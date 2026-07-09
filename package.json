@@ -1,0 +1,16 @@
+{
+  "name": "codehamr-ui",
+  "private": true,
+  "version": "0.1.0",
+  "description": "Desktop coding harness for the CodeHamr agent",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w @codehamr-ui/desktop",
+    "build": "npm run build -w @codehamr-ui/protocol && npm run build -w @codehamr-ui/desktop",
+    "typecheck": "npm run typecheck --workspaces --if-present",
+    "agent:build": "node scripts/build-agent.mjs"
+  }
+}

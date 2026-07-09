@@ -1,0 +1,39 @@
+import { contextBridge, ipcRenderer } from 'electron'
+import type { AgentEvent, Command, ConfigFile } from '@codehamr-ui/protocol'
+
+const api = {
+  pickWorkspace: (): Promise<string | null> => ipcRenderer.invoke('workspace:pick'),
+  readConfig: (cwd: string): Promise<ConfigFile | null> => ipcRenderer.invoke('config:read', cwd),
+  writeConfig: (cwd: string, cfg: ConfigFile): Promise<void> =>
+    ipcRenderer.invoke('config:write', cwd, cfg),
+  readTranscript: (cwd: string): Promise<unknown> => ipcRenderer.invoke('transcript:read', cwd),
+  writeTranscript: (cwd: string, items: unknown): Promise<void> =>
+    ipcRenderer.invoke('transcript:write', cwd, items),
+  startAgent: (cwd: string): Promise<boolean> => ipcRenderer.invoke('agent:start', cwd),
+  stopAgent: (): Promise<void> => ipcRenderer.invoke('agent:stop'),
+  send: (cmd: Command): Promise<void> => ipcRenderer.invoke('agent:send', cmd),
+  onEvent: (cb: (event: AgentEvent) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, event: AgentEvent): void => cb(event)
+    ipcRenderer.on('agent:event', handler)
+    return () => ipcRenderer.removeListener('agent:event', handler)
+  },
+  onNoise: (cb: (line: string) => void): (() => void) => {
+    const handler = (_e: Electron.IpcRendererEvent, line: string): void => cb(line)
+    ipcRenderer.on('agent:noise', handler)
+    return () => ipcRenderer.removeListener('agent:noise', handler)
+  },
+  onExit: (
+    cb: (info: { code: number | null; signal: string | null }) => void,
+  ): (() => void) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      info: { code: number | null; signal: string | null },
+    ): void => cb(info)
+    ipcRenderer.on('agent:exit', handler)
+    return () => ipcRenderer.removeListener('agent:exit', handler)
+  },
+}
+
+export type CodeHamrApi = typeof api
+
+contextBridge.exposeInMainWorld('codehamr', api)

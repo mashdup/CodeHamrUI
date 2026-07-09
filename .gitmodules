@@ -1,0 +1,3 @@
+[submodule "codehamr"]
+	path = codehamr
+	url = git@github.com:mashdup/codehamr.git
