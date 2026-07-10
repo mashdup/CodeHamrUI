@@ -26,6 +26,15 @@ const api = {
   setDefaultPreset: (name: string | null): Promise<void> =>
     ipcRenderer.invoke('presets:setDefault', name),
   readTranscript: (cwd: string): Promise<unknown> => ipcRenderer.invoke('transcript:read', cwd),
+  listChats: (
+    cwd: string,
+  ): Promise<{ id: string; title: string; updatedAt: number; current: boolean }[]> =>
+    ipcRenderer.invoke('chats:list', cwd),
+  newChatSession: (cwd: string): Promise<string> => ipcRenderer.invoke('chats:new', cwd),
+  switchChat: (cwd: string, id: string): Promise<void> =>
+    ipcRenderer.invoke('chats:switch', cwd, id),
+  deleteChat: (cwd: string, id: string): Promise<void> =>
+    ipcRenderer.invoke('chats:delete', cwd, id),
   writeTranscript: (cwd: string, items: unknown): Promise<void> =>
     ipcRenderer.invoke('transcript:write', cwd, items),
   startAgent: (cwd: string): Promise<{ running: boolean; seededFrom: string | null }> =>

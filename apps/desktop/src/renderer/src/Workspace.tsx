@@ -311,9 +311,66 @@ export default function Workspace({
     return () => clearTimeout(t)
   }, [items, cwd])
 
+  // ---------------------------------------------------------------------
+  // Chat history: New chat archives the current conversation; History
+  // switches between archived ones (agent restarts with that session).
+  // ---------------------------------------------------------------------
+  interface ChatEntry {
+    id: string
+    title: string
+    updatedAt: number
+    current: boolean
+  }
+  const [chats, setChats] = useState<ChatEntry[]>([])
+  const [historyOpen, setHistoryOpen] = useState(false)
+
+  /** Force-write the transcript now — the autosave debounce may be pending. */
+  const flushTranscript = async (): Promise<void> => {
+    if (loadedRef.current) await window.codehamr.writeTranscript(cwd, items)
+  }
+
+  const loadChats = async (): Promise<void> => {
+    setChats(await window.codehamr.listChats(cwd))
+  }
+
+  const loadTranscriptFromDisk = async (): Promise<void> => {
+    const saved = (await window.codehamr.readTranscript(cwd)) as Item[] | null
+    if (Array.isArray(saved)) {
+      for (const it of saved) {
+        const n = Number(String(it.id).slice(1))
+        if (Number.isFinite(n) && n >= nextId) nextId = n + 1
+      }
+      setItems(saved.map((it) => ('streaming' in it ? { ...it, streaming: false } : it)))
+    } else {
+      setItems([])
+    }
+  }
+
   const newChat = async (): Promise<void> => {
     if (!connected || busy) return
-    await window.codehamr.send(cwd, { v: PROTOCOL_VERSION, type: 'clear' })
+    setHistoryOpen(false)
+    await flushTranscript()
+    setConnected(false)
+    await window.codehamr.newChatSession(cwd) // archives the current pair
+    setItems([])
+    setQueue([])
+    await window.codehamr.startAgent(cwd)
+  }
+
+  const switchToChat = async (id: string): Promise<void> => {
+    setHistoryOpen(false)
+    if (busy || chats.find((c) => c.id === id)?.current) return
+    await flushTranscript()
+    setConnected(false)
+    await window.codehamr.switchChat(cwd, id)
+    await loadTranscriptFromDisk()
+    setQueue([])
+    await window.codehamr.startAgent(cwd)
+  }
+
+  const removeChat = async (id: string): Promise<void> => {
+    await window.codehamr.deleteChat(cwd, id)
+    await loadChats()
   }
 
   /** Normalize a path for cross-item comparison (win/mac slashes, case). */
@@ -524,15 +581,67 @@ export default function Workspace({
         </div>
       )}
 
-      <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
+      <div className="relative flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
         <button
           onClick={() => void newChat()}
           disabled={!connected || busy}
-          title="clear the conversation (model forgets everything)"
+          title="start a fresh conversation (this one is kept in History)"
           className="rounded bg-zinc-800 px-2.5 py-0.5 text-xs hover:bg-zinc-700 disabled:opacity-40"
         >
           New chat
         </button>
+        <button
+          onClick={() => {
+            setHistoryOpen((o) => !o)
+            if (!historyOpen) void loadChats()
+          }}
+          disabled={busy}
+          title={busy ? 'finish or cancel the turn first' : 'previous chats in this project'}
+          className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 disabled:opacity-40 ${historyOpen ? 'bg-zinc-700' : 'bg-zinc-800'}`}
+        >
+          History
+        </button>
+        {historyOpen && (
+          <div className="absolute top-full left-3 z-20 mt-1 max-h-80 w-96 overflow-y-auto rounded border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+            {chats.map((c) => (
+              <div
+                key={c.id}
+                className={`group flex items-center gap-2 px-3 py-1.5 text-xs ${
+                  c.current ? 'text-emerald-300' : 'text-zinc-300 hover:bg-zinc-800'
+                }`}
+              >
+                <button
+                  onClick={() => void switchToChat(c.id)}
+                  disabled={c.current}
+                  className="flex min-w-0 flex-1 items-center gap-2 text-left"
+                >
+                  <span className="truncate">{c.title}</span>
+                  {c.current && <span className="shrink-0 text-[10px] text-emerald-500">· active</span>}
+                  <span className="ml-auto shrink-0 text-[10px] text-zinc-500">
+                    {new Date(c.updatedAt).toLocaleString(undefined, {
+                      month: 'short',
+                      day: 'numeric',
+                      hour: '2-digit',
+                      minute: '2-digit',
+                    })}
+                  </span>
+                </button>
+                {!c.current && (
+                  <button
+                    onClick={() => void removeChat(c.id)}
+                    title="delete this chat permanently"
+                    className="shrink-0 rounded px-1 text-zinc-600 opacity-0 group-hover:opacity-100 hover:bg-red-950 hover:text-red-400"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+            ))}
+            {chats.length === 0 && (
+              <p className="px-3 py-2 text-xs text-zinc-500">no chats yet</p>
+            )}
+          </div>
+        )}
         <button
           onClick={() => setShowFiles((s) => !s)}
           title="toggle the file tree (Ctrl+B)"

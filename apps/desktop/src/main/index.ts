@@ -8,7 +8,7 @@ import {
   writeFileSync,
   type WriteStream,
 } from 'node:fs'
-import { readFile, writeFile, readdir, stat } from 'node:fs/promises'
+import { readFile, writeFile, readdir, stat, rename, rm } from 'node:fs/promises'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import electronUpdater from 'electron-updater'
 import { Command, ConfigFile } from '@codehamr-ui/protocol'
@@ -117,6 +117,69 @@ async function writeConfigFile(cwd: string, cfg: ConfigFile): Promise<void> {
   const dir = join(cwd, '.codehamr')
   mkdirSync(dir, { recursive: true })
   await writeFile(join(dir, 'config.yaml'), CONFIG_HEADER + stringifyYaml(cfg), 'utf8')
+}
+
+// ---------------------------------------------------------------------------
+// Chat history: one chat = the live pair (.codehamr/session.json for the
+// agent's memory + transcript.json for the UI view); archived chats keep
+// their pair under .codehamr/chats/<id>/. Switching swaps the live pair and
+// restarts the agent, which reads session.json at boot — the Go side needs
+// no knowledge of any of this.
+// ---------------------------------------------------------------------------
+
+const LIVE_CHAT_FILES = ['session.json', 'transcript.json']
+
+const chatsDir = (cwd: string): string => join(cwd, '.codehamr', 'chats')
+const chatMetaPath = (cwd: string): string => join(chatsDir(cwd), 'meta.json')
+
+function readChatMeta(cwd: string): { current: string } {
+  try {
+    const raw = JSON.parse(readFileSync(chatMetaPath(cwd), 'utf8')) as { current?: unknown }
+    if (typeof raw.current === 'string' && raw.current) return { current: raw.current }
+  } catch {
+    // fall through: first use, or corrupt meta — mint a fresh id either way
+  }
+  return { current: `chat-${Date.now()}` }
+}
+
+function writeChatMeta(cwd: string, meta: { current: string }): void {
+  mkdirSync(chatsDir(cwd), { recursive: true })
+  writeFileSync(chatMetaPath(cwd), JSON.stringify(meta), 'utf8')
+}
+
+/** Move the live pair into chats/<id>/ (missing files are fine). */
+async function archiveLiveChat(cwd: string, id: string): Promise<void> {
+  const dir = join(chatsDir(cwd), id)
+  mkdirSync(dir, { recursive: true })
+  for (const f of LIVE_CHAT_FILES) {
+    const src = join(cwd, '.codehamr', f)
+    if (existsSync(src)) await rename(src, join(dir, f))
+  }
+}
+
+/** Move chats/<id>/'s pair into the live slot and remove the archive dir. */
+async function restoreChat(cwd: string, id: string): Promise<void> {
+  const dir = join(chatsDir(cwd), id)
+  for (const f of LIVE_CHAT_FILES) {
+    const src = join(dir, f)
+    if (existsSync(src)) await rename(src, join(cwd, '.codehamr', f))
+  }
+  await rm(dir, { recursive: true, force: true })
+}
+
+/** First user message of a transcript file → list title. */
+async function chatTitle(transcriptPath: string): Promise<string> {
+  try {
+    const items = JSON.parse(await readFile(transcriptPath, 'utf8')) as {
+      kind?: string
+      text?: string
+    }[]
+    const firstUser = items.find((it) => it.kind === 'user' && it.text)
+    if (firstUser?.text) return firstUser.text.slice(0, 60)
+  } catch {
+    // unreadable/empty transcript: fall through
+  }
+  return 'untitled chat'
 }
 
 function createWindow(): void {
@@ -274,6 +337,63 @@ function wireIpc(): void {
       truncated,
       size: info.size,
     }
+  })
+
+  // -------------------------------------------------------------------------
+  // Chat history
+  // -------------------------------------------------------------------------
+
+  ipcMain.handle('chats:list', async (_evt, cwd: string) => {
+    const meta = readChatMeta(cwd)
+    const out: { id: string; title: string; updatedAt: number; current: boolean }[] = []
+    // Current chat: live transcript.
+    const livePath = join(cwd, '.codehamr', 'transcript.json')
+    out.push({
+      id: meta.current,
+      title: await chatTitle(livePath),
+      updatedAt: existsSync(livePath) ? (await stat(livePath)).mtimeMs : Date.now(),
+      current: true,
+    })
+    // Archived chats.
+    try {
+      for (const e of await readdir(chatsDir(cwd), { withFileTypes: true })) {
+        if (!e.isDirectory()) continue
+        const t = join(chatsDir(cwd), e.name, 'transcript.json')
+        out.push({
+          id: e.name,
+          title: await chatTitle(t),
+          updatedAt: existsSync(t) ? (await stat(t)).mtimeMs : 0,
+          current: false,
+        })
+      }
+    } catch {
+      // no chats dir yet
+    }
+    return out.sort((a, b) => Number(b.current) - Number(a.current) || b.updatedAt - a.updatedAt)
+  })
+
+  ipcMain.handle('chats:new', async (_evt, cwd: string) => {
+    stopSession(cwd)
+    const meta = readChatMeta(cwd)
+    await archiveLiveChat(cwd, meta.current)
+    const fresh = `chat-${Date.now()}`
+    writeChatMeta(cwd, { current: fresh })
+    return fresh
+  })
+
+  ipcMain.handle('chats:switch', async (_evt, cwd: string, id: string) => {
+    stopSession(cwd)
+    const meta = readChatMeta(cwd)
+    if (id === meta.current) return
+    await archiveLiveChat(cwd, meta.current)
+    await restoreChat(cwd, id)
+    writeChatMeta(cwd, { current: id })
+  })
+
+  ipcMain.handle('chats:delete', async (_evt, cwd: string, id: string) => {
+    const meta = readChatMeta(cwd)
+    if (id === meta.current) throw new Error('cannot delete the active chat')
+    await rm(join(chatsDir(cwd), id), { recursive: true, force: true })
   })
 
   ipcMain.handle('presets:list', async () => {
