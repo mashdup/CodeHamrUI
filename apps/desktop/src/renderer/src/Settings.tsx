@@ -158,6 +158,18 @@ export function SettingsPanel({
     setPresetName('')
   }
 
+  // Save the current form back onto the loaded preset (keeping its default
+  // flag). "Save & restart agent" only writes the project config; this is how
+  // edits flow back to the preset itself.
+  const updatePreset = async (): Promise<void> => {
+    if (!selectedPreset) return
+    setError('')
+    const cfg = buildConfig()
+    if (!cfg) return
+    await window.codehamr.savePreset(selectedPreset, cfg, defaultPreset === selectedPreset)
+    setPresets((prev) => ({ ...prev, [selectedPreset]: cfg }))
+  }
+
   const deleteSelected = async (): Promise<void> => {
     if (!selectedPreset) return
     await window.codehamr.deletePreset(selectedPreset)
@@ -225,6 +237,13 @@ export function SettingsPanel({
                 />
                 default for new projects
               </label>
+              <button
+                onClick={() => void updatePreset()}
+                title={`overwrite the "${selectedPreset}" preset with the current form`}
+                className="rounded bg-sky-900/60 px-2 py-0.5 text-xs text-sky-200 hover:bg-sky-900"
+              >
+                update “{selectedPreset}”
+              </button>
               <button
                 onClick={() => void deleteSelected()}
                 className="rounded px-2 py-0.5 text-xs text-red-400 hover:bg-red-950"
