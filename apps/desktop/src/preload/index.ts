@@ -1,7 +1,19 @@
-import { contextBridge, ipcRenderer } from 'electron'
+import { contextBridge, ipcRenderer, webUtils } from 'electron'
 import type { AgentEvent, Command, ConfigFile, PermissionMode } from '@codehamr-ui/protocol'
 
 const api = {
+  /**
+   * Absolute path of a dropped File. Electron removed the `File.path`
+   * property in v32; webUtils is the supported replacement and must be
+   * called from the preload.
+   */
+  getFilePath: (file: File): string => {
+    try {
+      return webUtils.getPathForFile(file)
+    } catch {
+      return '' // pasted/synthetic files have no filesystem path
+    }
+  },
   pickWorkspace: (): Promise<string | null> => ipcRenderer.invoke('workspace:pick'),
   readConfig: (cwd: string): Promise<ConfigFile | null> => ipcRenderer.invoke('config:read', cwd),
   writeConfig: (cwd: string, cfg: ConfigFile): Promise<void> =>

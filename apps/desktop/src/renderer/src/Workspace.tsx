@@ -14,7 +14,7 @@ import { FileTree, FileViewer } from './FileTree'
 type ToolStatus = 'pending_approval' | 'running' | 'done' | 'failed' | 'denied'
 
 type Item =
-  | { kind: 'user'; id: string; text: string; images?: string[] } // data: URLs
+  | { kind: 'user'; id: string; text: string; images?: string[]; files?: string[] } // data: URLs, file names
   | { kind: 'assistant'; id: string; text: string; streaming: boolean }
   | { kind: 'reasoning'; id: string; text: string; streaming: boolean }
   | {
@@ -39,28 +39,80 @@ type Phase = 'idle' | 'waiting' | 'thinking' | 'streaming' | 'tool'
 let nextId = 0
 const uid = (): string => `i${nextId++}`
 
-interface Attachment {
-  mime: string
-  dataB64: string
+/**
+ * Attachments are either images (sent as multimodal content parts, model
+ * permitting) or text files (inlined into the prompt with their absolute
+ * path, so the agent can go straight to read_file/edit_file on them).
+ */
+type ImageAttachment = { kind: 'image'; mime: string; dataB64: string }
+type FileAttachment = {
+  kind: 'file'
+  name: string
+  path: string // '' for pasted/synthetic files with no filesystem path
+  text: string
+  truncated: boolean
 }
+type Attachment = ImageAttachment | FileAttachment
 
-const MAX_IMAGES = 4
+const MAX_ATTACHMENTS = 6
 const MAX_IMAGE_BYTES = 8 * 1024 * 1024
+const MAX_FILE_BYTES = 2 * 1024 * 1024 // refuse to even read past this
+const MAX_INLINE_CHARS = 60_000 // ~15k tokens; the rest is a read_file away
 
-/** Last path segment, for the auto-mode banner. */
+/** Last path segment, for the auto-mode banner and file chips. */
 const basename = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p
 
-/** File → base64 attachment; oversized or non-image files resolve to null. */
-async function fileToAttachment(file: File): Promise<Attachment | null> {
-  if (!file.type.startsWith('image/') || file.size > MAX_IMAGE_BYTES) return null
-  const dataUrl = await new Promise<string>((resolve, reject) => {
+const readAs = (file: File, how: 'dataURL' | 'text'): Promise<string> =>
+  new Promise((resolve, reject) => {
     const r = new FileReader()
     r.onload = () => resolve(r.result as string)
     r.onerror = () => reject(r.error)
-    r.readAsDataURL(file)
+    if (how === 'dataURL') r.readAsDataURL(file)
+    else r.readAsText(file)
   })
-  const comma = dataUrl.indexOf(',')
-  return { mime: file.type, dataB64: dataUrl.slice(comma + 1) }
+
+/**
+ * Classify a dropped file. Returns the attachment, or a rejection reason to
+ * show the user — silently ignoring a dropped file is the worst outcome.
+ */
+async function fileToAttachment(
+  file: File,
+): Promise<{ ok: Attachment } | { reject: string }> {
+  if (file.type.startsWith('image/')) {
+    if (file.size > MAX_IMAGE_BYTES) return { reject: `${file.name}: image over 8MB` }
+    const dataUrl = await readAs(file, 'dataURL')
+    return { ok: { kind: 'image', mime: file.type, dataB64: dataUrl.slice(dataUrl.indexOf(',') + 1) } }
+  }
+  if (file.size > MAX_FILE_BYTES) {
+    return { reject: `${file.name}: over 2MB — ask the agent to read it instead` }
+  }
+  const text = await readAs(file, 'text')
+  // A NUL byte or a pile of replacement chars means we decoded binary as
+  // text; inlining that is noise the model pays tokens for.
+  const sample = text.slice(0, 4096)
+  if (sample.includes("\u0000") || (sample.match(/\uFFFD/g)?.length ?? 0) > 8) {
+    return { reject: `${file.name}: looks binary — only text files can be attached` }
+  }
+  return {
+    ok: {
+      kind: 'file',
+      name: file.name,
+      path: window.codehamr.getFilePath(file),
+      text: text.slice(0, MAX_INLINE_CHARS),
+      truncated: text.length > MAX_INLINE_CHARS,
+    },
+  }
+}
+
+/** Render file attachments as fenced blocks appended to the prompt. */
+function inlineFiles(text: string, files: FileAttachment[]): string {
+  if (files.length === 0) return text
+  const blocks = files.map((f) => {
+    const header = f.path ? `${f.name} (${f.path})` : f.name
+    const note = f.truncated ? ' — TRUNCATED, read the file for the rest' : ''
+    return `--- Attached file: ${header}${note} ---\n\`\`\`\n${f.text}\n\`\`\``
+  })
+  return [text, ...blocks].filter(Boolean).join('\n\n')
 }
 
 /**
@@ -443,31 +495,40 @@ export default function Workspace({
   )
 
   const addFiles = async (files: Iterable<File>): Promise<void> => {
-    const converted = await Promise.all([...files].map(fileToAttachment))
-    const good = converted.filter((a): a is Attachment => a !== null)
+    const results = await Promise.all([...files].map(fileToAttachment))
+    const good: Attachment[] = []
+    for (const r of results) {
+      if ('ok' in r) good.push(r.ok)
+      // A dropped file that vanishes with no explanation is the worst
+      // outcome; say why it didn't attach.
+      else push({ kind: 'notice', id: uid(), text: `not attached — ${r.reject}`, tone: 'info' })
+    }
     if (good.length === 0) return
-    setAttachments((prev) => [...prev, ...good].slice(0, MAX_IMAGES))
+    setAttachments((prev) => [...prev, ...good].slice(0, MAX_ATTACHMENTS))
   }
 
   const dispatchPrompt = useCallback(
-    async (text: string, images: Attachment[]): Promise<void> => {
+    async (text: string, atts: Attachment[]): Promise<void> => {
+      const images = atts.filter((a): a is ImageAttachment => a.kind === 'image')
+      const files = atts.filter((a): a is FileAttachment => a.kind === 'file')
       setBusy(true)
       setPhase('waiting')
       setTurnStart(Date.now())
       setElapsed(0)
+      // Transcript shows what you typed plus chips; the wire carries the
+      // inlined file contents.
       push({
         kind: 'user',
         id: uid(),
         text,
-        images: images.length
-          ? images.map((a) => `data:${a.mime};base64,${a.dataB64}`)
-          : undefined,
+        images: images.length ? images.map((a) => `data:${a.mime};base64,${a.dataB64}`) : undefined,
+        files: files.length ? files.map((f) => f.name) : undefined,
       })
       await window.codehamr.send(cwd, {
         v: PROTOCOL_VERSION,
         type: 'prompt',
-        text,
-        images: images.length ? images : undefined,
+        text: inlineFiles(text, files),
+        images: images.length ? images.map(({ mime, dataB64 }) => ({ mime, dataB64 })) : undefined,
       })
     },
     [cwd, push],
@@ -476,15 +537,15 @@ export default function Workspace({
   const sendPrompt = async (): Promise<void> => {
     const text = input.trim()
     if ((!text && attachments.length === 0) || !connected) return
-    const images = attachments
+    const atts = attachments
     setInput('')
     setAttachments([])
     // Mid-turn: queue instead of rejecting — it dispatches when the turn ends.
     if (busy) {
-      setQueue((q) => [...q, { text, images }])
+      setQueue((q) => [...q, { text, images: atts }])
       return
     }
-    await dispatchPrompt(text, images)
+    await dispatchPrompt(text, atts)
   }
 
   // Auto-dispatch the queue whenever the agent goes idle.
@@ -607,7 +668,7 @@ export default function Workspace({
     >
       {dragOver && connected && (
         <div className="pointer-events-none absolute inset-0 z-20 flex items-center justify-center border-2 border-dashed border-emerald-500 bg-emerald-950/40 text-sm text-emerald-300">
-          drop images to attach
+          drop files to attach — images go to the model, text files are inlined
         </div>
       )}
 
@@ -861,22 +922,43 @@ export default function Workspace({
               </div>
             )}
             {attachments.length > 0 && (
-              <div className="mb-2 flex items-end gap-2">
-                {attachments.map((a, i) => (
-                  <div key={i} className="group relative">
-                    <img
-                      src={`data:${a.mime};base64,${a.dataB64}`}
-                      className="h-16 w-16 rounded border border-zinc-700 object-cover"
-                    />
-                    <button
-                      onClick={() => setAttachments((prev) => prev.filter((_, idx) => idx !== i))}
-                      className="absolute -top-1.5 -right-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-zinc-700 text-[10px] leading-none group-hover:flex hover:bg-red-700"
+              <div className="mb-2 flex flex-wrap items-end gap-2">
+                {attachments.map((a, i) => {
+                  const remove = (): void =>
+                    setAttachments((prev) => prev.filter((_, idx) => idx !== i))
+                  return a.kind === 'image' ? (
+                    <div key={i} className="group relative">
+                      <img
+                        src={`data:${a.mime};base64,${a.dataB64}`}
+                        className="h-16 w-16 rounded border border-zinc-700 object-cover"
+                      />
+                      <button
+                        onClick={remove}
+                        className="absolute -top-1.5 -right-1.5 hidden h-4 w-4 items-center justify-center rounded-full bg-zinc-700 text-[10px] leading-none group-hover:flex hover:bg-red-700"
+                      >
+                        ✕
+                      </button>
+                    </div>
+                  ) : (
+                    <span
+                      key={i}
+                      title={a.path || a.name}
+                      className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs text-zinc-300"
                     >
-                      ✕
-                    </button>
-                  </div>
-                ))}
-                <VisionHint models={models} activeModel={activeModel} />
+                      <span>📄</span>
+                      <span className="max-w-48 truncate font-mono">{a.name}</span>
+                      <span className="text-[10px] text-zinc-500">
+                        {a.truncated ? 'truncated' : `${Math.max(1, Math.round(a.text.length / 1024))}KB`}
+                      </span>
+                      <button onClick={remove} className="text-zinc-500 hover:text-red-400">
+                        ✕
+                      </button>
+                    </span>
+                  )
+                })}
+                {attachments.some((a) => a.kind === 'image') && (
+                  <VisionHint models={models} activeModel={activeModel} />
+                )}
               </div>
             )}
             <div className="flex gap-2">
@@ -1025,6 +1107,18 @@ function TranscriptItem({
             <div className="mb-1.5 flex flex-wrap gap-1.5">
               {item.images.map((src, i) => (
                 <img key={i} src={src} className="max-h-40 rounded border border-emerald-800/50" />
+              ))}
+            </div>
+          )}
+          {item.files && item.files.length > 0 && (
+            <div className="mb-1.5 flex flex-wrap gap-1">
+              {item.files.map((name, i) => (
+                <span
+                  key={i}
+                  className="rounded bg-emerald-950/60 px-1.5 py-0.5 font-mono text-[11px] text-emerald-300"
+                >
+                  📄 {name}
+                </span>
               ))}
             </div>
           )}
