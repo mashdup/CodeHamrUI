@@ -197,8 +197,16 @@ export default function App(): React.JSX.Element {
           setActiveModel(event.activeModel)
           setModels(event.models)
           break
+        case 'log':
+          push({
+            kind: 'notice',
+            id: uid(),
+            text: event.message,
+            tone: event.level === 'warn' || event.level === 'error' ? 'error' : 'info',
+          })
+          break
         default:
-          break // log: not yet surfaced
+          break
       }
     },
     [endTurn],
