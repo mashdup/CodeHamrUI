@@ -39,6 +39,12 @@ jobs:
 
   macos:
     runs-on: macos-latest # arm64; dmg targets arm64 (see electron-builder.yml)
+    # Run AFTER the windows job, not in parallel. electron-builder's github
+    # publisher finds-or-creates a draft release by tag; two jobs publishing at
+    # the same instant each fail to see the other's in-flight draft and create
+    # their own → two drafts, same tag. Serializing means windows creates the
+    # draft and macos appends its dmg/zip/latest-mac.yml to that same draft.
+    needs: windows
     steps:
       - uses: actions/checkout@v4
         with:
