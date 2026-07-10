@@ -6,6 +6,18 @@ const api = {
   readConfig: (cwd: string): Promise<ConfigFile | null> => ipcRenderer.invoke('config:read', cwd),
   writeConfig: (cwd: string, cfg: ConfigFile): Promise<void> =>
     ipcRenderer.invoke('config:write', cwd, cfg),
+  listDir: (
+    root: string,
+    dir: string,
+  ): Promise<{ name: string; path: string; isDir: boolean }[]> =>
+    ipcRenderer.invoke('fs:list', root, dir),
+  readTextFile: (
+    root: string,
+    file: string,
+  ): Promise<
+    | { kind: 'text'; content: string; truncated: boolean; size: number }
+    | { kind: 'binary' | 'too-large'; size: number }
+  > => ipcRenderer.invoke('fs:read', root, file),
   listPresets: (): Promise<{ defaultPreset: string | null; presets: Record<string, ConfigFile> }> =>
     ipcRenderer.invoke('presets:list'),
   savePreset: (name: string, cfg: ConfigFile, setDefault: boolean): Promise<void> =>

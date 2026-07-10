@@ -1,9 +1,10 @@
-import { useCallback, useEffect, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import type { AgentEvent, ModelProfile } from '@codehamr-ui/protocol'
 import { PROTOCOL_VERSION } from '@codehamr-ui/protocol'
 import { SettingsPanel } from './Settings'
+import { FileTree, FileViewer } from './FileTree'
 
 // ---------------------------------------------------------------------------
 // Transcript model: the renderer's view of the conversation, built by folding
@@ -66,6 +67,11 @@ export default function App(): React.JSX.Element {
   const [showSettings, setShowSettings] = useState(false)
   const [attachments, setAttachments] = useState<Attachment[]>([])
   const [dragOver, setDragOver] = useState(false)
+  const [showFiles, setShowFiles] = useState(true)
+  const [treeRefresh, setTreeRefresh] = useState(0)
+  const [viewer, setViewer] = useState<{ path: string; body: string; note: string | null } | null>(
+    null,
+  )
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
   const [busy, setBusy] = useState(false)
@@ -115,6 +121,7 @@ export default function App(): React.JSX.Element {
           setItems([])
           break
         case 'file_diff':
+          setTreeRefresh((n) => n + 1) // the agent changed a file; tree catches up
           setItems((prev) =>
             prev.map((it) =>
               it.kind === 'tool' && it.id === event.callId
@@ -294,6 +301,54 @@ export default function App(): React.JSX.Element {
     await window.codehamr.send({ v: PROTOCOL_VERSION, type: 'clear' })
   }
 
+  /** Normalize a path for cross-item comparison (win/mac slashes, case). */
+  const normPath = (p: string): string => p.replace(/\\/g, '/').toLowerCase()
+
+  /** Resolve a tool-arg path (usually workspace-relative) to absolute. */
+  const toAbs = useCallback(
+    (p: string): string => (/^([a-zA-Z]:[\\/]|\/)/.test(p) ? p : `${workspace}/${p}`),
+    [workspace],
+  )
+
+  // Files the agent wrote/edited this session — emerald dots in the tree.
+  const touched = useMemo(() => {
+    const set = new Set<string>()
+    if (!workspace) return set
+    for (const it of items) {
+      if (
+        it.kind === 'tool' &&
+        (it.name === 'write_file' || it.name === 'edit_file') &&
+        it.status === 'done'
+      ) {
+        const p = String(it.args.path ?? '')
+        if (p) set.add(normPath(toAbs(p)))
+      }
+    }
+    return set
+  }, [items, workspace, toAbs])
+
+  const openFile = useCallback(
+    async (path: string): Promise<void> => {
+      if (!workspace) return
+      const abs = toAbs(path)
+      const result = await window.codehamr.readTextFile(workspace, abs)
+      if (result.kind === 'text') {
+        setViewer({
+          path: abs,
+          body: result.content,
+          note: result.truncated ? 'truncated view' : null,
+        })
+      } else {
+        setViewer({
+          path: abs,
+          body: '',
+          note: result.kind === 'binary' ? 'binary file' : `too large (${result.size} bytes)`,
+        })
+      }
+    },
+    [workspace, toAbs],
+  )
+
   const addFiles = async (files: Iterable<File>): Promise<void> => {
     const converted = await Promise.all([...files].map(fileToAttachment))
     const good = converted.filter((a): a is Attachment => a !== null)
@@ -398,6 +453,15 @@ export default function App(): React.JSX.Element {
             New chat
           </button>
         )}
+        {workspace && (
+          <button
+            onClick={() => setShowFiles((s) => !s)}
+            title="toggle the file tree"
+            className={`rounded px-3 py-1 text-sm hover:bg-zinc-700 ${showFiles ? 'bg-zinc-700' : 'bg-zinc-800'}`}
+          >
+            Files
+          </button>
+        )}
         <div className="ml-auto flex items-center gap-2 text-xs text-zinc-400">
           {models.length > 0 && (
             <select
@@ -444,6 +508,19 @@ export default function App(): React.JSX.Element {
         />
       )}
 
+      <div className="flex min-h-0 flex-1">
+        {workspace && showFiles && (
+          <aside className="w-56 shrink-0 overflow-y-auto border-r border-zinc-800">
+            <FileTree
+              root={workspace}
+              touched={touched}
+              refreshKey={treeRefresh}
+              onOpen={(p) => void openFile(p)}
+            />
+          </aside>
+        )}
+
+        <div className="flex min-w-0 flex-1 flex-col">
       <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
         {items.length === 0 && (
           <p className="mt-24 text-center text-sm text-zinc-500">
@@ -455,7 +532,7 @@ export default function App(): React.JSX.Element {
           </p>
         )}
         {items.map((item) => (
-          <TranscriptItem key={item.id} item={item} onDecide={decide} />
+          <TranscriptItem key={item.id} item={item} onDecide={decide} onOpenFile={(p) => void openFile(p)} />
         ))}
       </div>
 
@@ -522,6 +599,14 @@ export default function App(): React.JSX.Element {
           </button>
         </div>
       </footer>
+        </div>
+
+        {viewer && (
+          <div className="flex w-2/5 shrink-0">
+            <FileViewer file={viewer} onClose={() => setViewer(null)} />
+          </div>
+        )}
+      </div>
     </div>
   )
 }
@@ -604,9 +689,11 @@ type Decide = (callId: string, decision: 'allow' | 'deny', scope?: 'session') =>
 function TranscriptItem({
   item,
   onDecide,
+  onOpenFile,
 }: {
   item: Item
   onDecide: Decide
+  onOpenFile: (path: string) => void
 }): React.JSX.Element {
   switch (item.kind) {
     case 'user':
@@ -632,7 +719,7 @@ function TranscriptItem({
     case 'reasoning':
       return <ReasoningCard item={item} />
     case 'tool':
-      return <ToolCard item={item} onDecide={onDecide} />
+      return <ToolCard item={item} onDecide={onDecide} onOpenFile={onOpenFile} />
     case 'notice':
       return (
         <div
@@ -685,9 +772,11 @@ const statusLabel: Record<ToolStatus, string> = {
 function ToolCard({
   item,
   onDecide,
+  onOpenFile,
 }: {
   item: Extract<Item, { kind: 'tool' }>
   onDecide: Decide
+  onOpenFile: (path: string) => void
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const summary =
@@ -740,7 +829,7 @@ function ToolCard({
         </div>
       )}
 
-      {item.diff && <DiffBlock diff={item.diff} />}
+      {item.diff && <DiffBlock diff={item.diff} onOpenFile={onOpenFile} />}
 
       {open && item.output !== undefined && (
         <pre className="max-h-64 overflow-auto border-t border-zinc-800 px-3 py-2 font-mono text-xs whitespace-pre-wrap text-zinc-300">
@@ -755,11 +844,23 @@ function ToolCard({
  * DiffBlock: colored unified diff, auto-expanded — seeing what the agent
  * changed is the harness's whole point. Long diffs scroll inside the card.
  */
-function DiffBlock({ diff }: { diff: { path: string; unifiedDiff: string } }): React.JSX.Element {
+function DiffBlock({
+  diff,
+  onOpenFile,
+}: {
+  diff: { path: string; unifiedDiff: string }
+  onOpenFile: (path: string) => void
+}): React.JSX.Element {
   const lines = diff.unifiedDiff.split('\n')
   return (
     <div className="border-t border-zinc-800">
-      <div className="px-3 pt-2 font-mono text-xs text-zinc-400">{diff.path}</div>
+      <button
+        onClick={() => onOpenFile(diff.path)}
+        title="open this file in the viewer"
+        className="px-3 pt-2 font-mono text-xs text-sky-400 hover:underline"
+      >
+        {diff.path}
+      </button>
       <pre className="max-h-80 overflow-auto px-3 py-2 font-mono text-xs leading-5">
         {lines.map((line, i) => {
           let cls = 'text-zinc-400'

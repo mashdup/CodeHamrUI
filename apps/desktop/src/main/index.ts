@@ -1,5 +1,5 @@
 import { app, BrowserWindow, ipcMain, dialog } from 'electron'
-import { join } from 'node:path'
+import { join, resolve, sep } from 'node:path'
 import {
   existsSync,
   mkdirSync,
@@ -8,7 +8,7 @@ import {
   writeFileSync,
   type WriteStream,
 } from 'node:fs'
-import { readFile, writeFile } from 'node:fs/promises'
+import { readFile, writeFile, readdir, stat } from 'node:fs/promises'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import { Command, ConfigFile } from '@codehamr-ui/protocol'
 import { AgentSession } from './agent/AgentSession'
@@ -213,6 +213,47 @@ function wireIpc(): void {
       throw new Error(`active profile "${cfg.active}" does not exist`)
     }
     await writeConfigFile(cwd, cfg)
+  })
+
+  // -------------------------------------------------------------------------
+  // Workspace explorer: read-only filesystem access, always rooted to the
+  // open workspace. The renderer is our code, but the boundary is enforced
+  // here anyway — contextIsolation means treating it as semi-trusted.
+  // -------------------------------------------------------------------------
+
+  /** Throws unless p resolves inside root. Returns the resolved path. */
+  const insideWorkspace = (root: string, p: string): string => {
+    const abs = resolve(root, p)
+    const normRoot = resolve(root)
+    if (abs !== normRoot && !abs.startsWith(normRoot + sep)) {
+      throw new Error('path escapes the workspace')
+    }
+    return abs
+  }
+
+  ipcMain.handle('fs:list', async (_evt, root: string, dir: string) => {
+    const abs = insideWorkspace(root, dir)
+    const entries = await readdir(abs, { withFileTypes: true })
+    return entries
+      .map((e) => ({ name: e.name, path: join(abs, e.name), isDir: e.isDirectory() }))
+      .sort((a, b) => Number(b.isDir) - Number(a.isDir) || a.name.localeCompare(b.name))
+  })
+
+  ipcMain.handle('fs:read', async (_evt, root: string, file: string) => {
+    const abs = insideWorkspace(root, file)
+    const info = await stat(abs)
+    const CAP = 512 * 1024
+    if (info.size > CAP * 4) return { kind: 'too-large', size: info.size }
+    const buf = await readFile(abs)
+    // NUL in the head = binary; the viewer is for text.
+    if (buf.subarray(0, 8192).includes(0)) return { kind: 'binary', size: info.size }
+    const truncated = buf.length > CAP
+    return {
+      kind: 'text',
+      content: buf.subarray(0, CAP).toString('utf8'),
+      truncated,
+      size: info.size,
+    }
   })
 
   ipcMain.handle('presets:list', async () => {
