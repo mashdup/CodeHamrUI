@@ -1,0 +1,44 @@
+# electron-builder configuration. electron-vite bundles main/preload/renderer
+# (dependencies included) into out/, so the package ships only that bundle —
+# no node_modules — plus the codehamr agent binary as an extra resource.
+appId: com.mashdup.codehamr-ui
+productName: CodeHamr UI
+directories:
+  buildResources: build
+  output: release
+files:
+  - out/**
+  - package.json
+asar: true
+npmRebuild: false
+# npm workspaces hoist electron to the repo root where electron-builder can't
+# resolve the range; pin explicitly (keep in lockstep with the installed one).
+electronVersion: 37.10.3
+
+# The agent binary rides in resources/agent/; main's resolveBinary prefers it
+# when the app is packaged. Built by `npm run agent:build` (pinned Go flags:
+# GOEXPERIMENT=nogreenteagc — see PLAN.md §8).
+win:
+  icon: build/icon.png
+  target:
+    - target: nsis
+      arch: [x64]
+  extraResources:
+    - from: ../../codehamr/dist/codehamr.exe
+      to: agent/codehamr.exe
+nsis:
+  oneClick: true
+  perMachine: false
+  deleteAppDataOnUninstall: false
+
+# macOS: config ready; produce artifacts on a Mac (cross-building a dmg from
+# Windows is not supported). Unsigned until certs exist (see PLAN.md M6).
+mac:
+  icon: build/icon.png
+  category: public.app-category.developer-tools
+  target:
+    - target: dmg
+      arch: [arm64, x64]
+  extraResources:
+    - from: ../../codehamr/dist/codehamr
+      to: agent/codehamr

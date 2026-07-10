@@ -6,3 +6,4 @@ out/
 *.local
 .codehamr/
 .claude/settings.local.json
+release/

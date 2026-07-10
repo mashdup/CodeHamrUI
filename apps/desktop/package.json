@@ -3,11 +3,14 @@
   "version": "0.1.0",
   "private": true,
   "description": "CodeHamr UI — desktop coding harness",
+  "author": "mashdup",
   "main": "./out/main/index.js",
   "scripts": {
     "dev": "electron-vite dev",
     "build": "electron-vite build",
     "start": "electron-vite preview",
+    "dist:win": "electron-builder --win",
+    "dist:mac": "electron-builder --mac",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json"
   },
   "dependencies": {
@@ -23,6 +26,7 @@
     "@types/react-dom": "^19.1.0",
     "@vitejs/plugin-react": "^4.5.0",
     "electron": "^37.0.0",
+    "electron-builder": "^26.15.3",
     "electron-vite": "^4.0.0",
     "react": "^19.1.0",
     "react-dom": "^19.1.0",

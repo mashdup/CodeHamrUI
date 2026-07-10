@@ -29,12 +29,16 @@ function openCrashLog(cwd: string): void {
 }
 
 /**
- * Resolve the codehamr binary. Dev: prefer the fork's local build output;
- * fall back to PATH. M6 replaces this with a bundled binary + settings
- * override.
+ * Resolve the codehamr binary, in trust order: the copy bundled with the
+ * packaged app (pinned build, ships in resources/agent/), the fork's local
+ * dev build, then PATH as a last resort.
  */
 function resolveBinary(): string {
   const exe = process.platform === 'win32' ? 'codehamr.exe' : 'codehamr'
+  if (app.isPackaged) {
+    const bundled = join(process.resourcesPath, 'agent', exe)
+    if (existsSync(bundled)) return bundled
+  }
   // Repo layout: <root>/codehamr/dist/<exe> when built via `npm run agent:build`.
   const local = join(app.getAppPath(), '..', '..', 'codehamr', 'dist', exe)
   if (existsSync(local)) return local
