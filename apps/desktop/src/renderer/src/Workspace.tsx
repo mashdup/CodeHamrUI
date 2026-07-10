@@ -1036,6 +1036,7 @@ export default function Workspace({
           <div className="flex w-2/5 shrink-0">
             <FilePreview
               preview={viewer}
+              workspaceRoot={cwd}
               onClose={() => setViewer(null)}
               onUseInPrompt={useSnippetInPrompt}
             />

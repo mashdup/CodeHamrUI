@@ -78,10 +78,12 @@ function b64ToBytes(b64: string): Uint8Array {
 
 export function FilePreview({
   preview,
+  workspaceRoot,
   onClose,
   onUseInPrompt,
 }: {
   preview: Preview
+  workspaceRoot: string
   onClose: () => void
   onUseInPrompt: (snippet: string) => void
 }): React.JSX.Element {
@@ -102,7 +104,7 @@ export function FilePreview({
         </button>
       </div>
       <div className="min-h-0 flex-1 overflow-auto">
-        <Body preview={preview} onUseInPrompt={onUseInPrompt} />
+        <Body preview={preview} workspaceRoot={workspaceRoot} onUseInPrompt={onUseInPrompt} />
       </div>
     </div>
   )
@@ -110,14 +112,23 @@ export function FilePreview({
 
 function Body({
   preview,
+  workspaceRoot,
   onUseInPrompt,
 }: {
   preview: Preview
+  workspaceRoot: string
   onUseInPrompt: (snippet: string) => void
 }): React.JSX.Element {
   switch (preview.kind) {
     case 'text':
-      return <CodeView content={preview.content} path={preview.path} onUseInPrompt={onUseInPrompt} />
+      return (
+        <CodeView
+          content={preview.content}
+          path={preview.path}
+          workspaceRoot={workspaceRoot}
+          onUseInPrompt={onUseInPrompt}
+        />
+      )
     case 'markdown':
       return (
         <div className="markdown px-4 py-3 text-sm text-zinc-200">
@@ -190,10 +201,12 @@ function splitHighlightedLines(html: string): string[] {
 function CodeView({
   content,
   path,
+  workspaceRoot,
   onUseInPrompt,
 }: {
   content: string
   path: string
+  workspaceRoot: string
   onUseInPrompt: (snippet: string) => void
 }): React.JSX.Element {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
@@ -216,28 +229,70 @@ function CodeView({
     [html, interactive],
   )
 
+  // Workspace-relative path for snippet provenance headers.
+  const relPath = useMemo(() => {
+    const p = path.replace(/\\/g, '/')
+    const root = workspaceRoot.replace(/\\/g, '/').replace(/\/+$/, '')
+    return p.toLowerCase().startsWith(root.toLowerCase() + '/')
+      ? p.slice(root.length + 1)
+      : (p.split('/').pop() ?? p)
+  }, [path, workspaceRoot])
+
   const [anchor, setAnchor] = useState<number | null>(null)
   const [head, setHead] = useState<number | null>(null)
   const [dragging, setDragging] = useState(false)
+  // Refs mirror anchor/head so the drag-end handler reads the latest values
+  // without re-subscribing on every hover.
+  const anchorRef = useRef<number | null>(null)
+  const headRef = useRef<number | null>(null)
+  const setAnchorL = (n: number | null): void => {
+    anchorRef.current = n
+    setAnchor(n)
+  }
+  const setHeadL = (n: number | null): void => {
+    headRef.current = n
+    setHead(n)
+  }
 
-  // Floating action menu for a native text selection within the code.
+  // One floating menu drives both selection kinds. `lines`, when set, means it
+  // came from a gutter line-selection; null means a free text selection.
   const containerRef = useRef<HTMLDivElement>(null)
-  const [menu, setMenu] = useState<{ x: number; y: number; text: string } | null>(null)
+  const gutterDragRef = useRef(false)
+  const [menu, setMenu] = useState<{
+    x: number
+    y: number
+    code: string
+    lines: [number, number] | null
+  } | null>(null)
 
-  // Clear line-selection and menu when the previewed file changes.
+  // Clear selection state + menu when the previewed file changes.
   useEffect(() => {
-    setAnchor(null)
-    setHead(null)
+    setAnchorL(null)
+    setHeadL(null)
     setMenu(null)
   }, [content])
 
-  // End a drag even if the mouse is released outside the gutter.
+  // End a gutter drag anywhere, and open the line menu at the pointer.
   useEffect(() => {
     if (!dragging) return
-    const up = (): void => setDragging(false)
+    const up = (e: MouseEvent): void => {
+      setDragging(false)
+      const a = anchorRef.current
+      const h = headRef.current
+      if (a !== null && h !== null) {
+        const loN = Math.min(a, h)
+        const hiN = Math.max(a, h)
+        setMenu({
+          x: e.clientX,
+          y: e.clientY + 6,
+          code: rawLines.slice(loN - 1, hiN).join('\n'),
+          lines: [loN, hiN],
+        })
+      }
+    }
     window.addEventListener('mouseup', up)
     return () => window.removeEventListener('mouseup', up)
-  }, [dragging])
+  }, [dragging, rawLines])
 
   // Dismiss the menu on scroll (its fixed position would otherwise detach).
   useEffect(() => {
@@ -247,7 +302,24 @@ function CodeView({
     return () => window.removeEventListener('scroll', dismiss, true)
   }, [menu])
 
+  // Line number of the row containing a DOM node, via its data-ln ancestor.
+  const lineOf = (node: Node | null): number | null => {
+    let el: Element | null = node instanceof Element ? node : (node?.parentElement ?? null)
+    while (el && el !== containerRef.current) {
+      const ln = (el as HTMLElement).dataset?.ln
+      if (ln) return parseInt(ln, 10)
+      el = el.parentElement
+    }
+    return null
+  }
+
   const onTextMouseUp = (): void => {
+    // A gutter drag manages its own (line) menu; don't let this handler,
+    // which fires on the same mouseup, clear it.
+    if (gutterDragRef.current) {
+      gutterDragRef.current = false
+      return
+    }
     const sel = window.getSelection()
     if (!sel || sel.isCollapsed || !sel.toString().trim()) {
       setMenu(null)
@@ -258,25 +330,36 @@ function CodeView({
       setMenu(null)
       return
     }
+    const a = lineOf(range.startContainer)
+    const b = lineOf(range.endContainer)
+    const lines: [number, number] | null =
+      a !== null && b !== null ? [Math.min(a, b), Math.max(a, b)] : null
     const rect = range.getBoundingClientRect()
-    setMenu({ x: rect.left, y: rect.bottom + 6, text: sel.toString() })
+    setMenu({ x: rect.left, y: rect.bottom + 6, code: sel.toString(), lines })
   }
 
-  const dismissSelection = (): void => {
+  const dismiss = (): void => {
     setMenu(null)
     window.getSelection()?.removeAllRanges()
   }
 
+  const buildSnippet = (code: string, lines: [number, number] | null): string => {
+    const loc = lines
+      ? lines[0] === lines[1]
+        ? `${relPath} (line ${lines[0]})`
+        : `${relPath} (lines ${lines[0]}-${lines[1]})`
+      : relPath
+    return '`' + loc + '`:\n```' + (lang || ext) + '\n' + code.replace(/\n+$/, '') + '\n```'
+  }
+
   const useInPrompt = (): void => {
-    if (!menu) return
-    const body = menu.text.replace(/\n+$/, '')
-    onUseInPrompt('```' + (lang || ext) + '\n' + body + '\n```')
-    dismissSelection()
+    if (menu) onUseInPrompt(buildSnippet(menu.code, menu.lines))
+    dismiss()
   }
 
   const copySelection = (): void => {
-    if (menu) void navigator.clipboard.writeText(menu.text)
-    dismissSelection()
+    if (menu) void navigator.clipboard.writeText(menu.code)
+    dismiss()
   }
 
   const lo = anchor !== null && head !== null ? Math.min(anchor, head) : null
@@ -303,15 +386,16 @@ function CodeView({
           const n = i + 1
           const sel = selected(n)
           return (
-            <div key={i} className={`flex w-full ${sel ? 'bg-sky-500/15' : ''}`}>
+            <div key={i} data-ln={n} className={`flex w-full ${sel ? 'bg-sky-500/15' : ''}`}>
               <span
                 onMouseDown={(e) => {
                   e.preventDefault() // don't start a native text selection
-                  setAnchor(n)
-                  setHead(n)
+                  gutterDragRef.current = true
+                  setAnchorL(n)
+                  setHeadL(n)
                   setDragging(true)
                 }}
-                onMouseEnter={() => dragging && setHead(n)}
+                onMouseEnter={() => dragging && setHeadL(n)}
                 className={`sticky left-0 w-12 shrink-0 cursor-pointer border-r border-zinc-800 px-2 text-right select-none ${
                   sel
                     ? 'bg-sky-500/20 text-sky-300'
@@ -343,11 +427,18 @@ function CodeView({
           // the click, so the handlers still see it.
           onMouseDown={(e) => e.preventDefault()}
           style={{ position: 'fixed', left: menu.x, top: menu.y, zIndex: 50 }}
-          className="flex overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 text-xs shadow-xl"
+          className="flex items-center overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 text-xs shadow-xl"
         >
+          {menu.lines && (
+            <span className="px-2 py-1 text-[10px] text-zinc-500">
+              {menu.lines[0] === menu.lines[1]
+                ? `L${menu.lines[0]}`
+                : `L${menu.lines[0]}–${menu.lines[1]}`}
+            </span>
+          )}
           <button
             onClick={useInPrompt}
-            className="px-2.5 py-1 font-medium text-emerald-300 hover:bg-zinc-800"
+            className="border-l border-zinc-700 px-2.5 py-1 font-medium text-emerald-300 hover:bg-zinc-800"
           >
             Use in prompt
           </button>
