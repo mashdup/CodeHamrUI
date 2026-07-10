@@ -14,8 +14,25 @@ import { Command, ConfigFile } from '@codehamr-ui/protocol'
 import { AgentSession } from './agent/AgentSession'
 
 let win: BrowserWindow | null = null
-let session: AgentSession | null = null
-let crashLog: WriteStream | null = null
+
+/**
+ * One agent per open workspace tab, keyed by the workspace path. Every event
+ * forwarded to the renderer is tagged with that cwd so each tab folds only
+ * its own stream.
+ */
+interface WorkspaceSession {
+  session: AgentSession
+  log: WriteStream | null
+}
+const sessions = new Map<string, WorkspaceSession>()
+
+function stopSession(cwd: string): void {
+  const ws = sessions.get(cwd)
+  if (!ws) return
+  ws.session.stop()
+  ws.log?.end()
+  sessions.delete(cwd)
+}
 
 /**
  * Persist everything the agent says outside the protocol (stderr, stray
@@ -23,15 +40,15 @@ let crashLog: WriteStream | null = null
  * floods stderr far past what the transcript UI keeps readable; the full
  * trace on disk is what makes the post-mortem possible.
  */
-function openCrashLog(cwd: string): void {
-  crashLog?.end()
+function openCrashLog(cwd: string): WriteStream | null {
   try {
     const dir = join(cwd, '.codehamr')
     mkdirSync(dir, { recursive: true })
-    crashLog = createWriteStream(join(dir, 'harness.log'), { flags: 'w' })
-    crashLog.write(`# codehamr-ui agent session ${new Date().toISOString()}\n`)
+    const log = createWriteStream(join(dir, 'harness.log'), { flags: 'w' })
+    log.write(`# codehamr-ui agent session ${new Date().toISOString()}\n`)
+    return log
   } catch {
-    crashLog = null // logging must never block a session from starting
+    return null // logging must never block a session from starting
   }
 }
 
@@ -132,8 +149,8 @@ function wireIpc(): void {
   })
 
   ipcMain.handle('agent:start', async (_evt, cwd: string) => {
-    session?.stop()
-    openCrashLog(cwd)
+    stopSession(cwd)
+    const log = openCrashLog(cwd)
     // Brand-new project: seed config.yaml from the default preset (if any)
     // before the agent bootstraps, so a fresh folder starts with the user's
     // endpoints instead of the stock template.
@@ -146,36 +163,36 @@ function wireIpc(): void {
         seededFrom = store.defaultPreset!
       }
     }
-    session = new AgentSession({
+    const session = new AgentSession({
       binaryPath: resolveBinary(),
       cwd,
-      onEvent: (event) => win?.webContents.send('agent:event', event),
+      onEvent: (event) => win?.webContents.send('agent:event', { cwd, event }),
       onNoise: (line) => {
         // Mirror to the dev terminal too: a Go panic's stack trace lands on
         // stderr and this is the easiest place to read it in full.
-        console.error('[codehamr]', line)
-        crashLog?.write(line + '\n')
-        win?.webContents.send('agent:noise', line)
+        console.error(`[codehamr ${cwd}]`, line)
+        log?.write(line + '\n')
+        win?.webContents.send('agent:noise', { cwd, line })
       },
       onExit: (code, signal) => {
-        crashLog?.write(`# agent exited code=${code} signal=${signal}\n`)
-        win?.webContents.send('agent:exit', { code, signal })
+        log?.write(`# agent exited code=${code} signal=${signal}\n`)
+        win?.webContents.send('agent:exit', { cwd, code, signal })
       },
     })
+    sessions.set(cwd, { session, log })
     session.start()
     return { running: session.running, seededFrom }
   })
 
-  ipcMain.handle('agent:send', async (_evt, raw: unknown) => {
+  ipcMain.handle('agent:send', async (_evt, cwd: string, raw: unknown) => {
     // Never trust the renderer: validate against the protocol schema before
     // the command reaches the child's stdin.
     const cmd = Command.parse(raw)
-    session?.send(cmd)
+    sessions.get(cwd)?.session.send(cmd)
   })
 
-  ipcMain.handle('agent:stop', async () => {
-    session?.stop()
-    session = null
+  ipcMain.handle('agent:stop', async (_evt, cwd: string) => {
+    stopSession(cwd)
   })
 
   // UI transcript persistence: the renderer's rich view (tool cards, diffs)
@@ -297,6 +314,6 @@ app.whenReady().then(() => {
 })
 
 app.on('window-all-closed', () => {
-  session?.stop()
+  for (const cwd of [...sessions.keys()]) stopSession(cwd)
   if (process.platform !== 'darwin') app.quit()
 })

@@ -265,7 +265,7 @@ M1 and M2 can overlap; M1 is intentionally disposable once M2 lands.
 | **P1** | CI + releases | ✅ **Done** — CI green on first push (linux full Go suite, windows protocol+tools, app typecheck+build). `v0.1.0` tag built the NSIS installer **and the first-ever macOS dmg (arm64)** on hosted runners and published both to a draft GitHub Release. Release ritual: bump `apps/desktop/package.json` version → push matching `v*` tag → publish the draft from the Releases page. | ✅ done |
 | **P2** | Live validation *(user-owned)* | ✅ Confirmed working live 2026-07-10 (vision path included, after the endpoint-fallback + hint fixes). | ✅ done |
 | **P3** | Workspace explorer | ✅ **Done** — toggleable lazy file tree (Files button), emerald dots on agent-edited files, tree auto-refreshes on `file_diff`, read-only viewer pane (size-capped, binary-aware), diff headers click-through to the viewer. Workspace-rooted fs IPC with path-escape guard. | ✅ done |
-| **P4** | Multi-workspace tabs | Several projects open at once, one agent process per tab. | pending |
+| **P4** | Multi-workspace tabs | ✅ **Done** — tab bar in the header, one agent process per open project (main keeps a session map keyed by workspace; all events cwd-tagged). Inactive tabs stay mounted: transcripts, streams, and in-flight turns keep running in the background. Closing a tab stops its agent; reopening an open folder just activates its tab. | ✅ done |
 | **P5** | UX polish | Queue a prompt while a turn runs, transcript search, keyboard shortcuts. | pending |
 | **P6** | Signing + auto-update | Code-signing cert (Windows SmartScreen / macOS notarization), electron-updater fed by the P1 GitHub Releases. Costs money; needs no code groundwork beyond P1. | pending |
 

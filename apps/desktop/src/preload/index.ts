@@ -30,24 +30,30 @@ const api = {
     ipcRenderer.invoke('transcript:write', cwd, items),
   startAgent: (cwd: string): Promise<{ running: boolean; seededFrom: string | null }> =>
     ipcRenderer.invoke('agent:start', cwd),
-  stopAgent: (): Promise<void> => ipcRenderer.invoke('agent:stop'),
-  send: (cmd: Command): Promise<void> => ipcRenderer.invoke('agent:send', cmd),
-  onEvent: (cb: (event: AgentEvent) => void): (() => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, event: AgentEvent): void => cb(event)
+  stopAgent: (cwd: string): Promise<void> => ipcRenderer.invoke('agent:stop', cwd),
+  send: (cwd: string, cmd: Command): Promise<void> => ipcRenderer.invoke('agent:send', cwd, cmd),
+  onEvent: (cb: (payload: { cwd: string; event: AgentEvent }) => void): (() => void) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      payload: { cwd: string; event: AgentEvent },
+    ): void => cb(payload)
     ipcRenderer.on('agent:event', handler)
     return () => ipcRenderer.removeListener('agent:event', handler)
   },
-  onNoise: (cb: (line: string) => void): (() => void) => {
-    const handler = (_e: Electron.IpcRendererEvent, line: string): void => cb(line)
+  onNoise: (cb: (payload: { cwd: string; line: string }) => void): (() => void) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      payload: { cwd: string; line: string },
+    ): void => cb(payload)
     ipcRenderer.on('agent:noise', handler)
     return () => ipcRenderer.removeListener('agent:noise', handler)
   },
   onExit: (
-    cb: (info: { code: number | null; signal: string | null }) => void,
+    cb: (info: { cwd: string; code: number | null; signal: string | null }) => void,
   ): (() => void) => {
     const handler = (
       _e: Electron.IpcRendererEvent,
-      info: { code: number | null; signal: string | null },
+      info: { cwd: string; code: number | null; signal: string | null },
     ): void => cb(info)
     ipcRenderer.on('agent:exit', handler)
     return () => ipcRenderer.removeListener('agent:exit', handler)
