@@ -1,11 +1,12 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 
 /**
  * FileTree: lazy directory tree for the open workspace. Directories load on
  * first expand (never a full recursive walk — node_modules stays cheap).
  * `touched` paths (files the agent wrote/edited this session) get an emerald
- * dot; `refreshKey` bumps re-fetch every already-loaded directory so agent
- * edits appear without losing expansion state.
+ * dot. `reload` carries the specific directories that changed on disk; only
+ * those that are currently loaded are re-fetched — reloading the whole loaded
+ * tree on every change froze the panel once node_modules was expanded.
  */
 
 interface Entry {
@@ -17,40 +18,57 @@ interface Entry {
 export function FileTree({
   root,
   touched,
-  refreshKey,
+  reload,
   onOpen,
 }: {
   root: string
   touched: Set<string>
-  refreshKey: number
+  reload: { dirs: string[]; nonce: number } | null
   onOpen: (path: string) => void
 }): React.JSX.Element {
   const [children, setChildren] = useState<Record<string, Entry[]>>({})
   const [expanded, setExpanded] = useState<Set<string>>(new Set())
+  // Mirror of children for the reload effect to read which dirs are loaded
+  // without depending on children (which would re-subscribe constantly).
+  const loadedRef = useRef<Record<string, Entry[]>>({})
 
   const load = useCallback(
     async (dir: string): Promise<void> => {
       try {
         const entries = await window.codehamr.listDir(root, dir)
-        setChildren((prev) => ({ ...prev, [dir]: entries }))
+        setChildren((prev) => {
+          const next = { ...prev, [dir]: entries }
+          loadedRef.current = next
+          return next
+        })
       } catch {
-        setChildren((prev) => ({ ...prev, [dir]: [] }))
+        setChildren((prev) => {
+          const next = { ...prev, [dir]: [] }
+          loadedRef.current = next
+          return next
+        })
       }
     },
     [root],
   )
 
-  // Root loads immediately; on refresh, re-fetch everything already loaded.
+  // Load the root on mount / workspace change.
   useEffect(() => {
+    loadedRef.current = {}
+    setChildren({})
+    setExpanded(new Set())
     void load(root)
-    setChildren((prev) => {
-      for (const dir of Object.keys(prev)) {
-        if (dir !== root) void load(dir)
-      }
-      return prev
-    })
+  }, [root, load])
+
+  // Targeted reload: re-fetch only the changed directories that are loaded
+  // (or the root). Reloading a collapsed/unloaded dir would be wasted work.
+  useEffect(() => {
+    if (!reload) return
+    for (const dir of reload.dirs) {
+      if (dir === root || dir in loadedRef.current) void load(dir)
+    }
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [root, refreshKey, load])
+  }, [reload?.nonce])
 
   const toggle = (dir: string): void => {
     setExpanded((prev) => {

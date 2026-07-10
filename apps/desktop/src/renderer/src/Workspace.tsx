@@ -194,7 +194,12 @@ export default function Workspace({
   const [showFiles, setShowFiles] = useState(true)
   const [treeWidth, setTreeWidth] = usePanelWidth('tree', 224)
   const [previewWidth, setPreviewWidth] = usePanelWidth('preview', 480)
-  const [treeRefresh, setTreeRefresh] = useState(0)
+  // Targeted tree reload: which directories to re-fetch (only loaded ones are
+  // acted on). nonce makes each signal distinct even if the dirs repeat.
+  const [treeReload, setTreeReload] = useState<{ dirs: string[]; nonce: number } | null>(null)
+  const reloadDirs = useCallback((dirs: string[]) => {
+    setTreeReload((prev) => ({ dirs, nonce: (prev?.nonce ?? 0) + 1 }))
+  }, [])
   const [viewer, setViewer] = useState<Preview | null>(null)
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
@@ -269,8 +274,11 @@ export default function Workspace({
         case 'mode':
           setMode(event.mode) // the agent is the source of truth
           break
-        case 'file_diff':
-          setTreeRefresh((n) => n + 1) // the agent changed a file; tree catches up
+        case 'file_diff': {
+          // Reload just the edited file's directory (the watcher also catches
+          // it, but this is instant).
+          const abs = /^([a-zA-Z]:[\\/]|\/)/.test(event.path) ? event.path : `${cwd}/${event.path}`
+          reloadDirs([abs.replace(/[\\/][^\\/]*$/, '')])
           setItems((prev) =>
             prev.map((it) =>
               it.kind === 'tool' && it.id === event.callId
@@ -279,6 +287,7 @@ export default function Workspace({
             ),
           )
           break
+        }
         case 'reasoning_delta':
           setPhase('thinking')
           setItems((prev) => {
@@ -365,7 +374,7 @@ export default function Workspace({
           break
       }
     },
-    [endTurn, push, showToast, cwd],
+    [endTurn, push, showToast, reloadDirs, cwd],
   )
 
   // Subscribe to this workspace's slice of the event streams.
@@ -399,12 +408,12 @@ export default function Workspace({
   }, [cwd, onEvent, endTurn, push])
 
   // Filesystem changes in this workspace (agent bash, external edits) refresh
-  // the tree — the file_diff bump only covers write/edit_file.
+  // only the affected directories in the tree.
   useEffect(() => {
-    return window.codehamr.onFsChanged((changed) => {
-      if (changed === cwd) setTreeRefresh((n) => n + 1)
+    return window.codehamr.onFsChanged(({ cwd: changedCwd, dirs }) => {
+      if (changedCwd === cwd && dirs.length) reloadDirs(dirs)
     })
-  }, [cwd])
+  }, [cwd, reloadDirs])
 
   // Elapsed ticker for the status bar: proof of life while the model is silent.
   useEffect(() => {
@@ -966,7 +975,7 @@ export default function Workspace({
               <FileTree
                 root={cwd}
                 touched={touched}
-                refreshKey={treeRefresh}
+                reload={treeReload}
                 onOpen={(p) => void openFile(p)}
               />
             </aside>

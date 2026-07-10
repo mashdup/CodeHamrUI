@@ -59,17 +59,30 @@ const watchIgnore = new Set([
 function startWatcher(cwd: string): void {
   if (watchers.has(cwd)) return // survives agent restarts; start once per tab
   let timer: NodeJS.Timeout | null = null
+  // Absolute parent directories of changed entries, accumulated across the
+  // debounce window. The renderer reloads ONLY these (if loaded), never the
+  // whole tree — the difference between a targeted refresh and a storm of
+  // hundreds of listDir calls when node_modules is expanded.
+  const changed = new Set<string>()
   try {
     // recursive is native on Windows and macOS (our targets); on Linux it's
     // unsupported and throws — caught below, leaving the tree manual-refresh.
     const w = watch(cwd, { recursive: true, persistent: false }, (_evt, filename) => {
+      let parent = cwd
       if (filename) {
         const segs = String(filename).split(/[\\/]/)
         if (segs.some((s) => watchIgnore.has(s))) return
+        segs.pop() // drop the entry name, keep its directory
+        parent = segs.length ? join(cwd, ...segs) : cwd
       }
+      if (changed.size < 200) changed.add(parent)
       // Coalesce bursts (npm install fires thousands of events) into one ping.
       if (timer) clearTimeout(timer)
-      timer = setTimeout(() => win?.webContents.send('fs:changed', { cwd }), 300)
+      timer = setTimeout(() => {
+        const dirs = [...changed]
+        changed.clear()
+        win?.webContents.send('fs:changed', { cwd, dirs })
+      }, 300)
     })
     w.on('error', (e) => console.error('[watch]', cwd, e.message))
     watchers.set(cwd, w)
