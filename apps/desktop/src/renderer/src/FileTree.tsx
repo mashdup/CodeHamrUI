@@ -130,58 +130,53 @@ export function FileTree({
   const end = Math.min(rows.length, Math.ceil((scrollTop + viewportH) / ROW_H) + OVERSCAN)
   const visible = rows.slice(start, end)
 
+  // Spacer-based windowing: rows stay in normal document flow (they physically
+  // stack, so they can never overlap), padded above and below by the off-screen
+  // rows' collapsed height.
   return (
     <div
       ref={scrollRef}
       onScroll={(e) => setScrollTop(e.currentTarget.scrollTop)}
       className="h-full overflow-auto py-1 font-mono text-xs"
     >
-      <div style={{ height: rows.length * ROW_H, position: 'relative' }}>
-        {visible.map(({ entry, depth }, i) => {
-          const idx = start + i
-          const style: React.CSSProperties = {
-            position: 'absolute',
-            top: idx * ROW_H,
-            left: 0,
-            right: 0,
-            height: ROW_H,
-            paddingLeft: depth * 14 + 6,
-          }
-          if (entry.isDir) {
-            const open = expanded.has(entry.path)
-            return (
-              <button
-                key={entry.path}
-                onClick={() => toggle(entry.path)}
-                style={style}
-                className="flex items-center gap-1 text-left text-zinc-400 hover:bg-zinc-800/60"
-              >
-                <span className="w-3 shrink-0 text-[10px]">{open ? '▾' : '▸'}</span>
-                <span className="truncate">{entry.name}</span>
-              </button>
-            )
-          }
-          const isTouched = touched.has(entry.path.toLowerCase())
+      <div style={{ height: start * ROW_H }} />
+      {visible.map(({ entry, depth }) => {
+        const style: React.CSSProperties = { height: ROW_H, paddingLeft: depth * 14 + 6 }
+        if (entry.isDir) {
+          const open = expanded.has(entry.path)
           return (
             <button
               key={entry.path}
-              onClick={() => onOpen(entry.path)}
+              onClick={() => toggle(entry.path)}
               style={style}
-              title={entry.path}
-              className="flex items-center gap-1 text-left text-zinc-300 hover:bg-zinc-800/60"
+              className="flex w-full items-center gap-1 text-left text-zinc-400 hover:bg-zinc-800/60"
             >
-              <span className="w-3 shrink-0" />
+              <span className="w-3 shrink-0 text-[10px]">{open ? '▾' : '▸'}</span>
               <span className="truncate">{entry.name}</span>
-              {isTouched && (
-                <span
-                  className="ml-auto mr-2 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
-                  title="edited by the agent this session"
-                />
-              )}
             </button>
           )
-        })}
-      </div>
+        }
+        const isTouched = touched.has(entry.path.toLowerCase())
+        return (
+          <button
+            key={entry.path}
+            onClick={() => onOpen(entry.path)}
+            style={style}
+            title={entry.path}
+            className="flex w-full items-center gap-1 text-left text-zinc-300 hover:bg-zinc-800/60"
+          >
+            <span className="w-3 shrink-0" />
+            <span className="truncate">{entry.name}</span>
+            {isTouched && (
+              <span
+                className="ml-auto mr-2 h-1.5 w-1.5 shrink-0 rounded-full bg-emerald-400"
+                title="edited by the agent this session"
+              />
+            )}
+          </button>
+        )
+      })}
+      <div style={{ height: (rows.length - end) * ROW_H }} />
     </div>
   )
 }
