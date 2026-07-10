@@ -115,7 +115,7 @@ function PdfView({ dataB64 }: { dataB64: string }): React.JSX.Element {
           canvas.className = 'mx-auto mb-3 block max-w-full shadow-lg'
           container?.appendChild(canvas)
           const ctx = canvas.getContext('2d')
-          if (ctx) await page.render({ canvasContext: ctx, viewport, canvas }).promise
+          if (ctx) await page.render({ canvasContext: ctx, viewport }).promise
         }
         if (!cancelled) setStatus('done')
       } catch (e) {
