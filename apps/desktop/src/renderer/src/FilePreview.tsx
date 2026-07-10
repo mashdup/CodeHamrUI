@@ -135,12 +135,49 @@ function Body({ preview }: { preview: Preview }): React.JSX.Element {
   }
 }
 
+// Above this line count, drop the per-line interactive rendering for one fast
+// blob — tens of thousands of React rows would jank on open.
+const LINE_INTERACTIVE_CAP = 5000
+
 /**
- * Syntax-highlighted code with a line-number gutter, falling back to plain
- * text for unknown types. The gutter is a separate column of newline-joined
- * numbers rather than per-line wrapping, so highlight.js spans (which can
- * legally cross newlines, e.g. block comments) stay intact and every source
- * line still maps 1:1 to a gutter number.
+ * Split highlight.js output into one balanced HTML fragment per source line.
+ * hljs spans may cross newlines (block comments, template strings), so at each
+ * newline we close the currently-open spans and reopen them on the next line —
+ * every line renders as valid standalone markup. hljs emits only
+ * `<span class="...">`, `</span>`, and escaped text, which this tokenizer
+ * relies on.
+ */
+function splitHighlightedLines(html: string): string[] {
+  const tokens = html.match(/<span [^>]*>|<\/span>|[^<]+/g) ?? []
+  const lines: string[] = []
+  const open: string[] = []
+  let line = ''
+  for (const tok of tokens) {
+    if (tok === '</span>') {
+      open.pop()
+      line += tok
+    } else if (tok[0] === '<') {
+      open.push(tok)
+      line += tok
+    } else {
+      const parts = tok.split('\n')
+      for (let k = 0; k < parts.length; k++) {
+        line += parts[k]
+        if (k < parts.length - 1) {
+          lines.push(line + '</span>'.repeat(open.length))
+          line = open.join('')
+        }
+      }
+    }
+  }
+  lines.push(line + '</span>'.repeat(open.length))
+  return lines
+}
+
+/**
+ * Syntax-highlighted code with a line-number gutter. Clicking a gutter number
+ * selects that line; dragging across numbers selects the range. Falls back to
+ * plain text for unknown types and to a non-interactive blob for huge files.
  */
 function CodeView({ content, path }: { content: string; path: string }): React.JSX.Element {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
@@ -156,23 +193,88 @@ function CodeView({ content, path }: { content: string; path: string }): React.J
     return null
   }, [content, lang])
 
-  const gutter = useMemo(() => {
-    const n = content.split('\n').length
-    return Array.from({ length: n }, (_, i) => i + 1).join('\n')
+  const rawLines = useMemo(() => content.split('\n'), [content])
+  const interactive = rawLines.length <= LINE_INTERACTIVE_CAP
+  const htmlLines = useMemo(
+    () => (html && interactive ? splitHighlightedLines(html) : null),
+    [html, interactive],
+  )
+
+  const [anchor, setAnchor] = useState<number | null>(null)
+  const [head, setHead] = useState<number | null>(null)
+  const [dragging, setDragging] = useState(false)
+
+  // Clear the selection when the previewed file changes.
+  useEffect(() => {
+    setAnchor(null)
+    setHead(null)
   }, [content])
 
+  // End a drag even if the mouse is released outside the gutter.
+  useEffect(() => {
+    if (!dragging) return
+    const up = (): void => setDragging(false)
+    window.addEventListener('mouseup', up)
+    return () => window.removeEventListener('mouseup', up)
+  }, [dragging])
+
+  const lo = anchor !== null && head !== null ? Math.min(anchor, head) : null
+  const hi = anchor !== null && head !== null ? Math.max(anchor, head) : null
+  const selected = (n: number): boolean => lo !== null && n >= lo && n <= hi!
+
+  // Non-interactive fast path: original two-column blob for very large files.
+  if (!interactive) {
+    const gutter = rawLines.map((_, i) => i + 1).join('\n')
+    return (
+      <div className="flex font-mono text-xs leading-5">
+        <pre className="sticky left-0 shrink-0 border-r border-zinc-800 bg-zinc-950/60 px-3 py-2 text-right text-zinc-600 select-none">
+          {gutter}
+        </pre>
+        <pre className="flex-1 overflow-x-auto px-3 py-2">
+          {html ? (
+            <code className="hljs !bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
+          ) : (
+            <code className="whitespace-pre text-zinc-300">{content}</code>
+          )}
+        </pre>
+      </div>
+    )
+  }
+
   return (
-    <div className="flex font-mono text-xs leading-5">
-      <pre className="sticky left-0 shrink-0 border-r border-zinc-800 bg-zinc-950/60 px-3 py-2 text-right text-zinc-600 select-none">
-        {gutter}
-      </pre>
-      <pre className="flex-1 overflow-x-auto px-3 py-2">
-        {html ? (
-          <code className="hljs !bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
-        ) : (
-          <code className="whitespace-pre text-zinc-300">{content}</code>
-        )}
-      </pre>
+    <div className="hljs w-max min-w-full !bg-transparent py-2 font-mono text-xs leading-5">
+      {rawLines.map((raw, i) => {
+        const n = i + 1
+        const sel = selected(n)
+        return (
+          <div key={i} className={`flex w-full ${sel ? 'bg-sky-500/15' : ''}`}>
+            <span
+              onMouseDown={(e) => {
+                e.preventDefault() // don't start a native text selection
+                setAnchor(n)
+                setHead(n)
+                setDragging(true)
+              }}
+              onMouseEnter={() => dragging && setHead(n)}
+              className={`sticky left-0 w-12 shrink-0 cursor-pointer border-r border-zinc-800 px-2 text-right select-none ${
+                sel
+                  ? 'bg-sky-500/20 text-sky-300'
+                  : 'bg-zinc-950 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-400'
+              }`}
+            >
+              {n}
+            </span>
+            {htmlLines ? (
+              <code
+                className="flex-1 px-3 whitespace-pre"
+                dangerouslySetInnerHTML={{ __html: htmlLines[i] || ' ' }}
+              />
+            ) : (
+              <code className="flex-1 px-3 whitespace-pre text-zinc-300">{raw || ' '}</code>
+            )}
+          </div>
+        )
+      })}
     </div>
   )
 }
