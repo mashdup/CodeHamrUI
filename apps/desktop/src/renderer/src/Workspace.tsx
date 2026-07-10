@@ -85,6 +85,9 @@ export default function Workspace({
   )
   const [items, setItems] = useState<Item[]>([])
   const [input, setInput] = useState('')
+  const [queue, setQueue] = useState<{ text: string; images: Attachment[] }[]>([])
+  const [searchOpen, setSearchOpen] = useState(false)
+  const [query, setQuery] = useState('')
   const [busy, setBusy] = useState(false)
   const [phase, setPhase] = useState<Phase>('idle')
   const [runningTool, setRunningTool] = useState<string>('')
@@ -366,33 +369,63 @@ export default function Workspace({
     setAttachments((prev) => [...prev, ...good].slice(0, MAX_IMAGES))
   }
 
+  const dispatchPrompt = useCallback(
+    async (text: string, images: Attachment[]): Promise<void> => {
+      setBusy(true)
+      setPhase('waiting')
+      setTurnStart(Date.now())
+      setElapsed(0)
+      push({
+        kind: 'user',
+        id: uid(),
+        text,
+        images: images.length
+          ? images.map((a) => `data:${a.mime};base64,${a.dataB64}`)
+          : undefined,
+      })
+      await window.codehamr.send(cwd, {
+        v: PROTOCOL_VERSION,
+        type: 'prompt',
+        text,
+        images: images.length ? images : undefined,
+      })
+    },
+    [cwd, push],
+  )
+
   const sendPrompt = async (): Promise<void> => {
     const text = input.trim()
-    if ((!text && attachments.length === 0) || !connected || busy) return
+    if ((!text && attachments.length === 0) || !connected) return
     const images = attachments
     setInput('')
     setAttachments([])
-    setBusy(true)
-    setPhase('waiting')
-    setTurnStart(Date.now())
-    setElapsed(0)
-    push({
-      kind: 'user',
-      id: uid(),
-      text,
-      images: images.length ? images.map((a) => `data:${a.mime};base64,${a.dataB64}`) : undefined,
-    })
-    await window.codehamr.send(cwd, {
-      v: PROTOCOL_VERSION,
-      type: 'prompt',
-      text,
-      images: images.length ? images : undefined,
-    })
+    // Mid-turn: queue instead of rejecting — it dispatches when the turn ends.
+    if (busy) {
+      setQueue((q) => [...q, { text, images }])
+      return
+    }
+    await dispatchPrompt(text, images)
   }
+
+  // Auto-dispatch the queue whenever the agent goes idle.
+  useEffect(() => {
+    if (busy || !connected || queue.length === 0) return
+    const [next, ...rest] = queue
+    setQueue(rest)
+    void dispatchPrompt(next.text, next.images)
+  }, [busy, connected, queue, dispatchPrompt])
 
   const cancelTurn = async (): Promise<void> => {
     await window.codehamr.send(cwd, { v: PROTOCOL_VERSION, type: 'cancel' })
-    push({ kind: 'notice', id: uid(), text: 'cancelled', tone: 'info' })
+    // Cancel means "stop everything", not "stop this one and run the rest".
+    setQueue((q) => {
+      if (q.length > 0) {
+        push({ kind: 'notice', id: uid(), text: `cancelled (${q.length} queued prompt${q.length > 1 ? 's' : ''} discarded)`, tone: 'info' })
+        return []
+      }
+      push({ kind: 'notice', id: uid(), text: 'cancelled', tone: 'info' })
+      return q
+    })
   }
 
   const decide = async (
@@ -425,6 +458,47 @@ export default function Workspace({
   const awaitingApproval = items.some(
     (it) => it.kind === 'tool' && it.status === 'pending_approval',
   )
+
+  // Transcript search: filter view over the item's searchable text (never the
+  // base64 image payloads — they'd false-match almost any query).
+  const itemText = (it: Item): string => {
+    switch (it.kind) {
+      case 'tool':
+        return `${it.name} ${JSON.stringify(it.args)} ${it.output ?? ''} ${it.diff?.unifiedDiff ?? ''}`
+      default:
+        return it.text
+    }
+  }
+  const trimmedQuery = query.trim().toLowerCase()
+  const shown = trimmedQuery
+    ? items.filter((it) => itemText(it).toLowerCase().includes(trimmedQuery))
+    : items
+
+  // Keyboard shortcuts, active tab only.
+  useEffect(() => {
+    if (!visible) return
+    const h = (e: KeyboardEvent): void => {
+      if (e.ctrlKey && !e.shiftKey && e.key.toLowerCase() === 'f') {
+        e.preventDefault()
+        setSearchOpen(true)
+      } else if (e.ctrlKey && e.key.toLowerCase() === 'b') {
+        e.preventDefault()
+        setShowFiles((s) => !s)
+      } else if (e.ctrlKey && e.key === ',') {
+        e.preventDefault()
+        setShowSettings(true)
+      } else if (e.key === 'Escape') {
+        if (searchOpen) {
+          setSearchOpen(false)
+          setQuery('')
+        } else if (viewer) {
+          setViewer(null)
+        }
+      }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [visible, searchOpen, viewer])
 
   return (
     <div
@@ -461,11 +535,35 @@ export default function Workspace({
         </button>
         <button
           onClick={() => setShowFiles((s) => !s)}
-          title="toggle the file tree"
+          title="toggle the file tree (Ctrl+B)"
           className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 ${showFiles ? 'bg-zinc-700' : 'bg-zinc-800'}`}
         >
           Files
         </button>
+        {searchOpen ? (
+          <span className="flex items-center gap-1.5">
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              placeholder="search transcript… (Esc closes)"
+              className="w-56 rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-xs outline-none focus:border-zinc-500"
+            />
+            {trimmedQuery && (
+              <span className="text-[11px] text-zinc-500">
+                {shown.length} match{shown.length === 1 ? '' : 'es'}
+              </span>
+            )}
+          </span>
+        ) : (
+          <button
+            onClick={() => setSearchOpen(true)}
+            title="search transcript (Ctrl+F)"
+            className="rounded bg-zinc-800 px-2.5 py-0.5 text-xs hover:bg-zinc-700"
+          >
+            Search
+          </button>
+        )}
         <div className="ml-auto flex items-center gap-2 text-xs text-zinc-400">
           {models.length > 0 && (
             <select
@@ -535,7 +633,12 @@ export default function Workspace({
                 {connected ? 'Ready. Ask the agent something.' : 'Starting agent…'}
               </p>
             )}
-            {items.map((item) => (
+            {items.length > 0 && shown.length === 0 && (
+              <p className="mt-24 text-center text-sm text-zinc-500">
+                nothing matches “{query.trim()}”
+              </p>
+            )}
+            {shown.map((item) => (
               <TranscriptItem
                 key={item.id}
                 item={item}
@@ -555,6 +658,27 @@ export default function Workspace({
           )}
 
           <footer className="border-t border-zinc-800 p-3">
+            {queue.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-1.5">
+                {queue.map((q, i) => (
+                  <span
+                    key={i}
+                    className="flex items-center gap-1 rounded-full bg-zinc-800 px-2.5 py-0.5 text-xs text-zinc-400"
+                  >
+                    <span className="text-zinc-500">queued:</span>
+                    <span className="max-w-64 truncate">
+                      {q.text || `${q.images.length} image${q.images.length > 1 ? 's' : ''}`}
+                    </span>
+                    <button
+                      onClick={() => setQueue((prev) => prev.filter((_, idx) => idx !== i))}
+                      className="text-zinc-500 hover:text-red-400"
+                    >
+                      ✕
+                    </button>
+                  </span>
+                ))}
+              </div>
+            )}
             {attachments.length > 0 && (
               <div className="mb-2 flex items-end gap-2">
                 {attachments.map((a, i) => (
@@ -595,16 +719,24 @@ export default function Workspace({
                   }
                 }}
                 rows={2}
-                placeholder={connected ? 'Ask the agent… (Enter to send)' : 'Starting agent…'}
+                placeholder={
+                  !connected
+                    ? 'Starting agent…'
+                    : busy
+                      ? 'Type ahead — sends when the current turn finishes'
+                      : 'Ask the agent… (Enter to send)'
+                }
                 disabled={!connected}
                 className="flex-1 resize-none rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
               />
               <button
                 onClick={() => void sendPrompt()}
-                disabled={!connected || busy || (input.trim() === '' && attachments.length === 0)}
-                className="rounded bg-emerald-700 px-4 text-sm font-medium hover:bg-emerald-600 disabled:opacity-40"
+                disabled={!connected || (input.trim() === '' && attachments.length === 0)}
+                className={`rounded px-4 text-sm font-medium disabled:opacity-40 ${
+                  busy ? 'bg-zinc-700 hover:bg-zinc-600' : 'bg-emerald-700 hover:bg-emerald-600'
+                }`}
               >
-                {busy ? '…' : 'Send'}
+                {busy ? 'Queue' : 'Send'}
               </button>
             </div>
           </footer>

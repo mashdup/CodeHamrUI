@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useState } from 'react'
 import Workspace from './Workspace'
 
 /** Last path segment, for tab labels. */
@@ -19,6 +19,18 @@ export default function App(): React.JSX.Element {
     setTabs((prev) => (prev.includes(dir) ? prev : [...prev, dir]))
     setActive(dir)
   }
+
+  // Ctrl+O opens a project from anywhere.
+  useEffect(() => {
+    const h = (e: KeyboardEvent): void => {
+      if (e.ctrlKey && e.key.toLowerCase() === 'o') {
+        e.preventDefault()
+        void openWorkspace()
+      }
+    }
+    window.addEventListener('keydown', h)
+    return () => window.removeEventListener('keydown', h)
+  }, [])
 
   const closeTab = async (dir: string): Promise<void> => {
     await window.codehamr.stopAgent(dir)
