@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
+import remarkBreaks from 'remark-breaks'
+import { highlight } from './syntax'
 import type { AgentEvent, ModelProfile, PermissionMode } from '@codehamr-ui/protocol'
 import { PROTOCOL_VERSION } from '@codehamr-ui/protocol'
 import { SettingsPanel } from './Settings'
@@ -352,6 +354,16 @@ export default function Workspace({
   useEffect(() => {
     scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight })
   }, [items])
+
+  // Auto-grow the composer with its content, between ~2 lines and a cap, then
+  // scroll internally. Runs on every input change (typing, paste, snippet
+  // insert, and clear-on-send).
+  useEffect(() => {
+    const el = inputRef.current
+    if (!el) return
+    el.style.height = 'auto'
+    el.style.height = `${Math.max(52, Math.min(el.scrollHeight, 260))}px`
+  }, [input])
 
   // Boot: restore the saved transcript, then start (or adopt) the agent.
   const loadedRef = useRef(false)
@@ -1008,16 +1020,16 @@ export default function Workspace({
                     void sendPrompt()
                   }
                 }}
-                rows={2}
+                rows={1}
                 placeholder={
                   !connected
                     ? 'Starting agent…'
                     : busy
                       ? 'Type ahead — sends when the current turn finishes'
-                      : 'Ask the agent… (Enter to send)'
+                      : 'Ask the agent… (Enter to send, Shift+Enter for newline)'
                 }
                 disabled={!connected}
-                className="flex-1 resize-none rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
+                className="max-h-[260px] flex-1 resize-none overflow-y-auto rounded border border-zinc-700 bg-zinc-900 px-3 py-2 text-sm outline-none focus:border-zinc-500 disabled:opacity-50"
               />
               <button
                 onClick={() => void sendPrompt()}
@@ -1134,7 +1146,7 @@ function TranscriptItem({
   switch (item.kind) {
     case 'user':
       return (
-        <div className="ml-auto max-w-[80%] rounded-lg bg-emerald-900/40 px-3 py-2 text-sm whitespace-pre-wrap">
+        <div className="ml-auto max-w-[80%] rounded-lg bg-emerald-900/40 px-3 py-2 text-sm">
           {item.images && item.images.length > 0 && (
             <div className="mb-1.5 flex flex-wrap gap-1.5">
               {item.images.map((src, i) => (
@@ -1154,7 +1166,7 @@ function TranscriptItem({
               ))}
             </div>
           )}
-          {item.text}
+          {item.text && <Markdown text={item.text} />}
         </div>
       )
     case 'assistant':
@@ -1334,10 +1346,31 @@ function DiffBlock({
 }
 
 /** Markdown renderer for assistant bubbles, styled for the dark transcript. */
+// Custom code renderer: syntax-highlight fenced blocks with the shared hljs;
+// leave inline code (no language class) to the CSS styling.
+function MdCode({
+  className,
+  children,
+}: {
+  className?: string
+  children?: React.ReactNode
+}): React.JSX.Element {
+  const lang = /language-(\w+)/.exec(className ?? '')?.[1]
+  const html = lang ? highlight(String(children).replace(/\n$/, ''), lang) : null
+  if (html) {
+    return <code className="hljs !bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
+  }
+  return <code className={className}>{children}</code>
+}
+
+const MD_COMPONENTS = { code: MdCode }
+
 function Markdown({ text }: { text: string }): React.JSX.Element {
   return (
     <div className="space-y-2 text-sm [&_a]:text-sky-400 [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:border-zinc-700 [&_blockquote]:pl-3 [&_blockquote]:text-zinc-400 [&_code]:rounded [&_code]:bg-zinc-800 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_h1]:text-base [&_h1]:font-bold [&_h2]:text-sm [&_h2]:font-bold [&_h3]:font-semibold [&_li]:ml-4 [&_ol]:list-decimal [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-zinc-950 [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_table]:border-collapse [&_td]:border [&_td]:border-zinc-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-zinc-700 [&_th]:bg-zinc-800 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc">
-      <ReactMarkdown remarkPlugins={[remarkGfm]}>{text}</ReactMarkdown>
+      <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>
+        {text}
+      </ReactMarkdown>
     </div>
   )
 }
