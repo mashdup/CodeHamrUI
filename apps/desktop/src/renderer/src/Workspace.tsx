@@ -122,18 +122,21 @@ const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.m
 // ---------------------------------------------------------------------------
 // Responsive three-pane layout. The file tree and preview are fixed-width side
 // panels; the chat column is the flexible middle. Naively they'd squeeze the
-// chat to nothing on a narrow window. Instead we measure the container and,
-// as it shrinks, first pull the panels down toward their minimums (keeping a
-// usable chat column), then float them over the chat as overlay drawers.
+// chat to nothing on a narrow window. Instead we measure the container and give
+// the chat first claim on MIN_CHAT px; each side panel is shown only if it
+// (down to its minimum) still fits in what's left, and otherwise auto-hides.
+// Priority when space runs out: chat > file tree > preview. The tree is small
+// and is primary navigation; the preview is large and transient (reopened by
+// clicking a file), so it's the first to go.
 // ---------------------------------------------------------------------------
 
-const MIN_CHAT = 380 // chat never gets narrower than this while panels are inline
+const MIN_CHAT = 380 // chat keeps at least this many px; panels hide before eating into it
 const TREE_MIN = 160
 const TREE_MAX = 560
 const PREVIEW_MIN = 300
 const HANDLE_W = 4 // ResizeHandle width (w-1) + slack
 
-type PanelMode = 'inline' | 'overlay' | 'hidden'
+type PanelMode = 'inline' | 'hidden'
 type PanelLayout = { mode: PanelMode; width: number }
 
 function computeLayout(
@@ -143,43 +146,23 @@ function computeLayout(
   treeW: number,
   previewW: number,
 ): { tree: PanelLayout; preview: PanelLayout } {
-  const tree: PanelLayout = { mode: showTree ? 'inline' : 'hidden', width: treeW }
-  const preview: PanelLayout = { mode: showPreview ? 'inline' : 'hidden', width: previewW }
-  const wantTree = showTree ? treeW : 0
-  const wantPrev = showPreview ? previewW : 0
-  const handles = (showTree ? HANDLE_W : 0) + (showPreview ? HANDLE_W : 0)
+  const tree: PanelLayout = { mode: 'hidden', width: treeW }
+  const preview: PanelLayout = { mode: 'hidden', width: previewW }
+  // Reserve the chat's minimum up front; panels draw only from what remains.
+  let remaining = cw - MIN_CHAT
 
-  // Roomy: both fit inline at their chosen widths with a comfortable chat.
-  if (cw - wantTree - wantPrev - handles >= MIN_CHAT) return { tree, preview }
-
-  // Tight: keep them inline but shrink toward their minimums, splitting the
-  // available budget in proportion to how much each wanted above its minimum.
-  const budget = cw - MIN_CHAT - handles
-  const minSum = (showTree ? TREE_MIN : 0) + (showPreview ? PREVIEW_MIN : 0)
-  if (budget >= minSum) {
-    const extra = budget - minSum
-    const treeExtra = showTree ? treeW - TREE_MIN : 0
-    const prevExtra = showPreview ? previewW - PREVIEW_MIN : 0
-    const extraSum = treeExtra + prevExtra
-    // Distribute the leftover budget in proportion to what each panel wanted
-    // above its minimum; if both are already at their minimums, split evenly.
-    const openPanels = (showTree ? 1 : 0) + (showPreview ? 1 : 0)
-    const share = (own: number): number =>
-      extraSum > 0 ? (extra * own) / extraSum : extra / openPanels
-    if (showTree) tree.width = Math.round(TREE_MIN + share(treeExtra))
-    if (showPreview) preview.width = Math.round(PREVIEW_MIN + share(prevExtra))
-    return { tree, preview }
+  // Tree gets first refusal (small, primary navigation). It may shrink toward
+  // its minimum to fit; below that it stays hidden.
+  if (showTree && remaining >= TREE_MIN + HANDLE_W) {
+    tree.mode = 'inline'
+    tree.width = Math.min(treeW, remaining - HANDLE_W)
+    remaining -= tree.width + HANDLE_W
   }
-
-  // Cramped: not enough room for both panels + a usable chat even at minimums.
-  // Float the open panels over the chat, which now spans the full width.
-  if (showTree) {
-    tree.mode = 'overlay'
-    tree.width = Math.min(treeW, cw - 48)
-  }
-  if (showPreview) {
-    preview.mode = 'overlay'
-    preview.width = Math.min(previewW, cw - 48)
+  // Preview takes whatever's left, shrinking toward its minimum, else hides.
+  if (showPreview && remaining >= PREVIEW_MIN + HANDLE_W) {
+    preview.mode = 'inline'
+    preview.width = Math.min(previewW, remaining - HANDLE_W)
+    remaining -= preview.width + HANDLE_W
   }
   return { tree, preview }
 }
@@ -933,8 +916,18 @@ export default function Workspace({
         )}
         <button
           onClick={() => setShowFiles((s) => !s)}
-          title="toggle the file tree (Ctrl+B)"
-          className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 ${showFiles ? 'bg-zinc-700' : 'bg-zinc-800'}`}
+          title={
+            showFiles && layout.tree.mode === 'hidden'
+              ? 'file tree hidden — window too narrow (widen to show)'
+              : 'toggle the file tree (Ctrl+B)'
+          }
+          className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 ${
+            showFiles
+              ? layout.tree.mode === 'hidden'
+                ? 'bg-zinc-800 text-zinc-500 italic' // wants to show but collapsed by width
+                : 'bg-zinc-700'
+              : 'bg-zinc-800'
+          }`}
         >
           Files
         </button>
@@ -1229,45 +1222,6 @@ export default function Workspace({
               />
             </div>
           </>
-        )}
-
-        {/* Overlay drawers: on a window too narrow for inline panels, the open
-            panels float over the chat with a scrim. Clicking the scrim (or a
-            panel's own close) dismisses them; the chat stays full-width. */}
-        {(layout.tree.mode === 'overlay' || layout.preview.mode === 'overlay') && (
-          <div
-            className="absolute inset-0 z-20 bg-black/50"
-            onClick={() => {
-              if (layout.tree.mode === 'overlay') setShowFiles(false)
-              if (layout.preview.mode === 'overlay') setViewer(null)
-            }}
-          />
-        )}
-        {layout.tree.mode === 'overlay' && (
-          <aside
-            style={{ width: layout.tree.width }}
-            className="absolute inset-y-0 left-0 z-30 overflow-hidden border-r border-zinc-800 bg-zinc-950 shadow-2xl"
-          >
-            <FileTree
-              root={cwd}
-              touched={touched}
-              reload={treeReload}
-              onOpen={(p) => void openFile(p)}
-            />
-          </aside>
-        )}
-        {viewer && layout.preview.mode === 'overlay' && (
-          <div
-            style={{ width: layout.preview.width }}
-            className="absolute inset-y-0 right-0 z-40 flex bg-zinc-950 shadow-2xl"
-          >
-            <FilePreview
-              preview={viewer}
-              workspaceRoot={cwd}
-              onClose={() => setViewer(null)}
-              onUseInPrompt={useSnippetInPrompt}
-            />
-          </div>
         )}
       </div>
 
