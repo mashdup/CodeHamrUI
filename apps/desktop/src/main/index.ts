@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
 import { join, resolve, sep } from 'node:path'
 import {
   existsSync,
@@ -11,6 +11,8 @@ import {
   type FSWatcher,
 } from 'node:fs'
 import { readFile, writeFile, readdir, stat, rename, rm } from 'node:fs/promises'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import electronUpdater from 'electron-updater'
 import { Command, ConfigFile } from '@codehamr-ui/protocol'
@@ -196,6 +198,67 @@ function writePresets(store: PresetStore): void {
   writeFileSync(presetsPath(), JSON.stringify(store, null, 2), 'utf8')
 }
 
+const execFileP = promisify(execFile)
+
+const countLines = (s: string): number => {
+  if (s === '') return 0
+  const n = (s.match(/\n/g) ?? []).length
+  return s.endsWith('\n') ? n : n + 1
+}
+
+/**
+ * Working-tree diff stat, to mirror what git tools (and Claude Code) show:
+ * tracked changes vs HEAD from `git diff --numstat`, PLUS every line of each
+ * untracked (new, non-ignored) file counted as an addition — a plain
+ * `git diff` omits those. Falls back to unstaged-only for a repo with no
+ * commits yet. Returns null on any failure (not a repo, git missing) so the UI
+ * hides the badge.
+ */
+async function gitDiffStat(cwd: string): Promise<{ added: number; removed: number } | null> {
+  const run = async (args: string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileP('git', ['-C', cwd, ...args], {
+        windowsHide: true,
+        timeout: 5000,
+        maxBuffer: 16 * 1024 * 1024,
+      })
+      return stdout
+    } catch {
+      return null
+    }
+  }
+  const out = (await run(['diff', 'HEAD', '--numstat'])) ?? (await run(['diff', '--numstat']))
+  if (out === null) return null
+  let added = 0
+  let removed = 0
+  for (const line of out.split('\n')) {
+    // "<added>\t<removed>\t<path>"; binary files show "-\t-\t" and are skipped.
+    const m = /^(\d+)\t(\d+)\t/.exec(line)
+    if (m) {
+      added += Number(m[1])
+      removed += Number(m[2])
+    }
+  }
+  // Untracked new files: each line is an addition. --exclude-standard respects
+  // .gitignore, so node_modules/build output stay out.
+  const untracked = await run(['ls-files', '--others', '--exclude-standard'])
+  if (untracked) {
+    for (const rel of untracked.split('\n').filter(Boolean).slice(0, 5000)) {
+      try {
+        const abs = join(cwd, rel)
+        const info = await stat(abs)
+        if (info.size > 10 * 1024 * 1024) continue // skip huge blobs
+        const buf = await readFile(abs)
+        if (buf.subarray(0, 8192).includes(0)) continue // binary
+        added += countLines(buf.toString('utf8'))
+      } catch {
+        /* unreadable file: skip */
+      }
+    }
+  }
+  return { added, removed }
+}
+
 const CONFIG_HEADER =
   '# codehamr configuration — edited via CodeAnvil\n' +
   '# key: ${MY_KEY} expands the env var at runtime, keeping secrets off disk.\n\n'
@@ -297,6 +360,9 @@ function createWindow(): void {
       contextIsolation: true,
       nodeIntegration: false,
       sandbox: false,
+      // Live-preview browser pane (<webview> in the renderer). webviews get
+      // Chromium defaults: no node integration, isolated session.
+      webviewTag: true,
     },
   })
   win.on('ready-to-show', () => win?.show())
@@ -309,6 +375,30 @@ function createWindow(): void {
 }
 
 function wireIpc(): void {
+  // Working-tree diff stat (git diff --numstat vs HEAD): totals of added and
+  // removed lines. Returns null when it's not a git repo or git is missing, so
+  // the UI can hide the badge.
+  ipcMain.handle('git:diffstat', async (_evt, cwd: string) => gitDiffStat(cwd))
+
+  // System clipboard access for the composer's right-click menu. Routed
+  // through main because the sandboxed preload can't import the clipboard
+  // module directly, and navigator.clipboard is unreliable without focus.
+  ipcMain.handle('clipboard:read', () => clipboard.readText())
+  ipcMain.handle('clipboard:write', (_evt, text: string) => {
+    clipboard.writeText(String(text))
+  })
+
+  // Re-tint the native Windows caption buttons to match the current theme.
+  // No-op on macOS (traffic lights aren't a colored overlay).
+  ipcMain.handle('titlebar:overlay', (_evt, color: string, symbolColor: string) => {
+    if (process.platform !== 'win32' || !win) return
+    try {
+      win.setTitleBarOverlay({ color, symbolColor, height: 40 })
+    } catch {
+      /* overlay unavailable on this window */
+    }
+  })
+
   ipcMain.handle('workspace:pick', async () => {
     if (!win) return null
     const result = await dialog.showOpenDialog(win, {

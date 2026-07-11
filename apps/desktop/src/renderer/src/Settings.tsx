@@ -1,5 +1,13 @@
 import { useEffect, useState } from 'react'
 import type { ConfigFile } from '@codehamr-ui/protocol'
+import {
+  SCHEMES,
+  applyTheme,
+  applyZoom,
+  loadThemeChoice,
+  loadZoom,
+  type ThemeChoice,
+} from './themes'
 
 /**
  * Settings: the graphical .codehamr/config.yaml editor. Edits are staged in
@@ -361,6 +369,165 @@ export function SettingsPanel({
         </div>
       </div>
     </div>
+  )
+}
+
+/**
+ * AppearanceModal: theme + accessibility, opened from the workspace bar (not
+ * the per-project model settings — these apply to the whole app, live).
+ */
+export function AppearanceModal({ onClose }: { onClose: () => void }): React.JSX.Element {
+  const [theme, setTheme] = useState<ThemeChoice>(() => loadThemeChoice())
+  const [zoom, setZoom] = useState(() => loadZoom())
+  const pickTheme = (choice: ThemeChoice): void => {
+    setTheme(choice)
+    applyTheme(choice)
+  }
+  return (
+    <div
+      className="fixed inset-0 z-10 flex items-center justify-center bg-black/60"
+      onClick={onClose}
+    >
+      <div
+        className="w-[560px] max-w-[95vw] rounded-lg border border-zinc-700 bg-zinc-900 p-5"
+        onClick={(e) => e.stopPropagation()}
+      >
+        <div className="mb-3 flex items-center">
+          <h2 className="text-sm font-semibold">Appearance</h2>
+          <span className="ml-2 text-xs text-zinc-500">whole app, applies immediately</span>
+          <button onClick={onClose} className="ml-auto rounded px-2 text-zinc-400 hover:bg-zinc-800">
+            ✕
+          </button>
+        </div>
+        <div className="space-y-4">
+          <div className="rounded border border-zinc-800 bg-zinc-950/50 p-3">
+            <div className="mb-2 text-xs font-semibold text-zinc-300">Theme</div>
+            <ThemeRow theme={theme} onPick={pickTheme} />
+          </div>
+          <div className="rounded border border-zinc-800 bg-zinc-950/50 p-3">
+            <div className="mb-2 text-xs font-semibold text-zinc-300">Accessibility</div>
+            <label className="flex items-center gap-3 text-xs text-zinc-400">
+              UI scale
+              <input
+                type="range"
+                min={70}
+                max={160}
+                step={5}
+                value={Math.round(zoom * 100)}
+                onChange={(e) => {
+                  const f = Number(e.target.value) / 100
+                  setZoom(f)
+                  applyZoom(f)
+                }}
+                className="w-56"
+              />
+              <span className="w-10 text-right tabular-nums text-zinc-300">
+                {Math.round(zoom * 100)}%
+              </span>
+              {zoom !== 1 && (
+                <button
+                  onClick={() => {
+                    setZoom(1)
+                    applyZoom(1)
+                  }}
+                  className="rounded bg-zinc-800 px-2 py-0.5 hover:bg-zinc-700"
+                >
+                  reset
+                </button>
+              )}
+            </label>
+            <p className="mt-1.5 text-[10px] text-zinc-600">
+              scales the entire interface — text, panels, spacing
+            </p>
+          </div>
+        </div>
+      </div>
+    </div>
+  )
+}
+
+/** Theme swatches + custom color inputs. */
+function ThemeRow({
+  theme,
+  onPick,
+}: {
+  theme: ThemeChoice
+  onPick: (choice: ThemeChoice) => void
+}): React.JSX.Element {
+  const swatch = (s: (typeof SCHEMES)[number]): React.JSX.Element => (
+    <button
+      key={s.name}
+      onClick={() => onPick({ name: s.name })}
+      className={`flex items-center gap-1.5 rounded border px-2 py-1 text-xs ${
+        theme.name === s.name
+          ? 'border-zinc-400 bg-zinc-800 text-zinc-100'
+          : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'
+      }`}
+    >
+      <span className="h-3 w-3 rounded-sm border border-black/40" style={{ background: s.bg }} />
+      <span className="h-3 w-3 rounded-full" style={{ background: s.accent }} />
+      {s.label}
+    </button>
+  )
+  return (
+    <>
+      <div className="flex flex-wrap items-center gap-2">
+        {SCHEMES.filter((s) => !s.light).map(swatch)}
+        <span className="mx-0.5 self-stretch border-l border-zinc-700" />
+        <span className="text-[10px] text-zinc-600">light</span>
+        {SCHEMES.filter((s) => s.light).map(swatch)}
+        <button
+          onClick={() =>
+            onPick({
+              name: 'custom',
+              custom: theme.custom ?? { bg: '#161d21', accent: '#2dd4bf' },
+            })
+          }
+          className={`rounded border px-2 py-1 text-xs ${
+            theme.name === 'custom'
+              ? 'border-zinc-400 bg-zinc-800 text-zinc-100'
+              : 'border-zinc-700 bg-zinc-900 text-zinc-400 hover:bg-zinc-800'
+          }`}
+        >
+          Custom…
+        </button>
+      </div>
+      {theme.name === 'custom' && (
+        <div className="mt-2 flex flex-wrap items-center gap-4 text-xs text-zinc-400">
+          <label className="flex items-center gap-1.5">
+            surface
+            <input
+              type="color"
+              value={theme.custom?.bg ?? '#161d21'}
+              onChange={(e) =>
+                onPick({
+                  name: 'custom',
+                  custom: { bg: e.target.value, accent: theme.custom?.accent ?? '#2dd4bf' },
+                })
+              }
+              className="h-6 w-9 cursor-pointer rounded border border-zinc-700 bg-transparent"
+            />
+          </label>
+          <label className="flex items-center gap-1.5">
+            accent
+            <input
+              type="color"
+              value={theme.custom?.accent ?? '#2dd4bf'}
+              onChange={(e) =>
+                onPick({
+                  name: 'custom',
+                  custom: { bg: theme.custom?.bg ?? '#161d21', accent: e.target.value },
+                })
+              }
+              className="h-6 w-9 cursor-pointer rounded border border-zinc-700 bg-transparent"
+            />
+          </label>
+          <span className="text-[10px] text-zinc-600">
+            a light surface color makes a light theme — the whole ramp flips
+          </span>
+        </div>
+      )}
+    </>
   )
 }
 

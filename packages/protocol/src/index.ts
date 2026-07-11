@@ -56,6 +56,12 @@ export const ClearCommand = z.object({
   type: z.literal('clear'),
 })
 
+/** Summarize the conversation into a single message to reclaim context. */
+export const CompactCommand = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('compact'),
+})
+
 /** ask = gate every side-effecting tool; auto = run them unattended. */
 export const PermissionMode = z.enum(['ask', 'auto'])
 export type PermissionMode = z.infer<typeof PermissionMode>
@@ -73,6 +79,7 @@ export const Command = z.discriminatedUnion('type', [
   SetModelCommand,
   GetModelsCommand,
   ClearCommand,
+  CompactCommand,
   SetModeCommand,
 ])
 export type Command = z.infer<typeof Command>
@@ -103,6 +110,17 @@ export const ReadyEvent = z.object({
 export const ClearedEvent = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('cleared'),
+})
+
+/** Emitted after a `compact` command: the agent's history was replaced by a
+ *  summary. text is the summary, historyLen the new message count, message a
+ *  human-readable note (e.g. "compacted 42 messages into a summary"). */
+export const CompactedEvent = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('compacted'),
+  text: z.string().optional(),
+  historyLen: z.number().int().nonnegative().optional(),
+  message: z.string().optional(),
 })
 
 export const ModeEvent = z.object({
@@ -155,6 +173,15 @@ export const FileDiffEvent = z.object({
   unifiedDiff: z.string(),
 })
 
+/** Agent asked the harness to show something: a workspace file in the
+ *  preview panel (path) or a URL in the live browser panel (url). */
+export const PreviewEvent = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('preview'),
+  path: z.string().optional(),
+  url: z.string().optional(),
+})
+
 export const TurnDoneEvent = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('turn_done'),
@@ -190,6 +217,7 @@ export const LogEvent = z.object({
 export const AgentEvent = z.discriminatedUnion('type', [
   ReadyEvent,
   ClearedEvent,
+  CompactedEvent,
   ModeEvent,
   AssistantDeltaEvent,
   ReasoningDeltaEvent,
@@ -197,6 +225,7 @@ export const AgentEvent = z.discriminatedUnion('type', [
   ToolCallEvent,
   ToolResultEvent,
   FileDiffEvent,
+  PreviewEvent,
   TurnDoneEvent,
   ModelsEvent,
   ErrorEvent,

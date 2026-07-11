@@ -1,13 +1,18 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import ReactMarkdown from 'react-markdown'
 import remarkGfm from 'remark-gfm'
 import remarkBreaks from 'remark-breaks'
 import { highlight } from './syntax'
 import type { AgentEvent, ModelProfile, PermissionMode } from '@codehamr-ui/protocol'
 import { PROTOCOL_VERSION } from '@codehamr-ui/protocol'
-import { SettingsPanel } from './Settings'
+import { AppearanceModal, SettingsPanel } from './Settings'
 import { FileTree } from './FileTree'
 import { FilePreview, type Preview } from './FilePreview'
+import { BrowserPane } from './BrowserPane'
+
+// Module-scoped so ids stay unique across every workspace tab.
+let nextId = 0
+const uid = (): string => `i${nextId++}`
 
 // ---------------------------------------------------------------------------
 // Transcript model: the renderer's view of the conversation, built by folding
@@ -17,8 +22,8 @@ import { FilePreview, type Preview } from './FilePreview'
 type ToolStatus = 'pending_approval' | 'running' | 'done' | 'failed' | 'denied'
 
 type Item =
-  | { kind: 'user'; id: string; text: string; images?: string[]; files?: string[] } // data: URLs, file names
-  | { kind: 'assistant'; id: string; text: string; streaming: boolean }
+  | { kind: 'user'; id: string; text: string; images?: string[]; files?: string[]; pinned?: boolean } // data: URLs, file names
+  | { kind: 'assistant'; id: string; text: string; streaming: boolean; pinned?: boolean }
   | { kind: 'reasoning'; id: string; text: string; streaming: boolean }
   | {
       kind: 'tool'
@@ -31,6 +36,8 @@ type Item =
     }
   | { kind: 'notice'; id: string; text: string; tone: 'info' | 'error' }
 
+type ToolItem = Extract<Item, { kind: 'tool' }>
+
 /**
  * Phase drives the live status bar. Local models can be silent for minutes
  * during prefill, and reasoning models think before answering — without this
@@ -38,9 +45,19 @@ type Item =
  */
 type Phase = 'idle' | 'waiting' | 'thinking' | 'streaming' | 'tool'
 
-// Module-scoped so ids stay unique across every workspace tab.
-let nextId = 0
-const uid = (): string => `i${nextId++}`
+/** Which preview panels are open, in stacking order (top → bottom). */
+type PreviewPanel = 'file' | 'browser'
+
+// Slash commands available from the composer. `arg` (when set) means the
+// command takes an argument, so completing it inserts a trailing space instead
+// of running immediately. Handlers live in runSlash inside the component.
+type SlashCmd = { name: string; desc: string; arg?: string }
+const SLASH_COMMANDS: SlashCmd[] = [
+  { name: '/compact', desc: 'Summarize the conversation to reclaim context' },
+  { name: '/model', desc: 'Switch model', arg: '<name>' },
+  { name: '/clear', desc: 'Reset the conversation' },
+  { name: '/help', desc: 'List slash commands' },
+]
 
 /**
  * Attachments are either images (sent as multimodal content parts, model
@@ -117,7 +134,61 @@ function ResizeHandle({ onResize }: { onResize: (dx: number) => void }): React.J
   )
 }
 
+/** Horizontal divider for the stacked preview panels; reports vertical delta. */
+function RowResizeHandle({ onResize }: { onResize: (dy: number) => void }): React.JSX.Element {
+  const onMouseDown = (e: React.MouseEvent): void => {
+    e.preventDefault()
+    let last = e.clientY
+    const move = (ev: MouseEvent): void => {
+      onResize(ev.clientY - last)
+      last = ev.clientY
+    }
+    const up = (): void => {
+      window.removeEventListener('mousemove', move)
+      window.removeEventListener('mouseup', up)
+      document.body.style.cursor = ''
+      document.body.style.userSelect = ''
+    }
+    window.addEventListener('mousemove', move)
+    window.addEventListener('mouseup', up)
+    document.body.style.cursor = 'row-resize'
+    document.body.style.userSelect = 'none'
+  }
+  return (
+    <div
+      onMouseDown={onMouseDown}
+      className="h-1 shrink-0 cursor-row-resize bg-zinc-800 transition-colors hover:bg-sky-600"
+    />
+  )
+}
+
 const clamp = (v: number, lo: number, hi: number): number => Math.max(lo, Math.min(hi, v))
+
+/** One row of the compact workspace-bar burger menu; closes the menu on use. */
+function BarMenuItem({
+  children,
+  onClick,
+  close,
+  disabled,
+}: {
+  children: React.ReactNode
+  onClick: () => void
+  close: (open: boolean) => void
+  disabled?: boolean
+}): React.JSX.Element {
+  return (
+    <button
+      onClick={() => {
+        close(false)
+        onClick()
+      }}
+      disabled={disabled}
+      className="block w-full px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+    >
+      {children}
+    </button>
+  )
+}
 
 // ---------------------------------------------------------------------------
 // Responsive three-pane layout. The file tree and preview are fixed-width side
@@ -266,19 +337,95 @@ export default function Workspace({
     setTreeReload((prev) => ({ dirs, nonce: (prev?.nonce ?? 0) + 1 }))
   }, [])
   const [viewer, setViewer] = useState<Preview | null>(null)
+  const [browserOpen, setBrowserOpen] = useState(false)
+  // The preview slot stacks the file viewer and the live browser vertically.
+  // panelOrder records open order: [0] on top, closing one gives the other the
+  // full height. An adjustable row divider sets the split (each panel min 160px).
+  const [panelOrder, setPanelOrder] = useState<PreviewPanel[]>([])
+  const openPanel = useCallback((p: PreviewPanel) => {
+    setPanelOrder((o) => (o.includes(p) ? o : [...o, p]))
+  }, [])
+  const closeViewer = useCallback(() => {
+    setViewer(null)
+    setPanelOrder((o) => o.filter((x) => x !== 'file'))
+  }, [])
+  const closeBrowser = useCallback(() => {
+    setBrowserOpen(false)
+    setPanelOrder((o) => o.filter((x) => x !== 'browser'))
+  }, [])
+  const previewSlotRef = useRef<HTMLDivElement>(null)
+  const [splitRatio, setSplitRatio] = useState(() => {
+    const s = Number(localStorage.getItem('chpreviewsplit'))
+    return Number.isFinite(s) && s > 0.1 && s < 0.9 ? s : 0.5
+  })
+  const adjustSplit = useCallback((dy: number) => {
+    setSplitRatio((prev) => {
+      const h = previewSlotRef.current?.clientHeight ?? 600
+      const min = 160 / h
+      const next = clamp(prev + dy / h, min, 1 - min)
+      localStorage.setItem('chpreviewsplit', String(next))
+      return next
+    })
+  }, [])
+  // Agent-driven navigation for the browser pane (preview_url tool).
+  const [browserNav, setBrowserNav] = useState<{ url: string; nonce: number } | null>(null)
+  // Pending agent preview request from the event stream (see the effect below).
+  const [agentPreview, setAgentPreview] = useState<{
+    path?: string
+    url?: string
+    nonce: number
+  } | null>(null)
+  const previewInUse = panelOrder.length > 0
   const [mainRef, mainW] = useElementWidth<HTMLDivElement>()
   // Default to a wide value until measured so the first paint is inline (the
   // common case) rather than flashing the overlay drawers.
   const layout = useMemo(
-    () => computeLayout(mainW || 99999, showFiles, !!viewer, treeWidth, previewWidth),
-    [mainW, showFiles, viewer, treeWidth, previewWidth],
+    () => computeLayout(mainW || 99999, showFiles, previewInUse, treeWidth, previewWidth),
+    [mainW, showFiles, previewInUse, treeWidth, previewWidth],
   )
   const [items, setItems] = useState<Item[]>([])
+
+  // Current git branch, shown next to the diff badge. null while unknown / not
+  // a git repo → hidden. (Populate via setCurrentBranch when wired up.)
+  const [currentBranch, setCurrentBranch] = useState<string | null>(null)
+  void setCurrentBranch // reserved: branch detection not wired yet
+  // Working-tree git diff stat, shown in the bar. Fetched from the main process
+  // (real `git diff --numstat`) and refreshed on mount, on filesystem changes,
+  // and when a turn ends. null while unknown / not a git repo → badge hidden.
+  const [diffStats, setDiffStats] = useState<{ added: number; removed: number } | null>(null)
+  const gitTimer = useRef<number | undefined>(undefined)
+  const refreshGitStat = useCallback(() => {
+    window.clearTimeout(gitTimer.current)
+    gitTimer.current = window.setTimeout(() => {
+      void window.codehamr.gitDiffStat(cwd).then(setDiffStats)
+    }, 250)
+  }, [cwd])
   const [input, setInput] = useState('')
   const inputRef = useRef<HTMLTextAreaElement>(null)
+  // Slash-command palette: highlighted row, and a dismissed flag so Escape can
+  // hide the popover without clearing what the user typed.
+  const [slashSel, setSlashSel] = useState(0)
+  const [slashClosed, setSlashClosed] = useState(false)
   const [queue, setQueue] = useState<{ text: string; images: Attachment[] }[]>([])
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
+  // Right-click context menu on user/assistant messages (copy / pin).
+  const [msgMenu, setMsgMenu] = useState<{ x: number; y: number; id: string } | null>(null)
+  // Right-click context menu on the composer input (cut / copy / paste). The
+  // selection is captured at open time so the actions are unaffected by the
+  // textarea losing focus to the menu.
+  const [inputMenu, setInputMenu] = useState<{
+    x: number
+    y: number
+    start: number
+    end: number
+  } | null>(null)
+  const [pinsOpen, setPinsOpen] = useState(false)
+  const [showAppearance, setShowAppearance] = useState(false)
+  // Workspace bar collapses its buttons into a burger menu when narrow.
+  const [barRef, barW] = useElementWidth<HTMLDivElement>()
+  const compactBar = barW > 0 && barW < 520
+  const [barMenuOpen, setBarMenuOpen] = useState(false)
   const [busy, setBusy] = useState(false)
   const [phase, setPhase] = useState<Phase>('idle')
   const [runningTool, setRunningTool] = useState<string>('')
@@ -343,6 +490,18 @@ export default function Workspace({
         case 'cleared':
           setItems([])
           break
+        case 'compacted':
+          endTurn()
+          push({
+            kind: 'notice',
+            id: uid(),
+            text:
+              event.historyLen === 0
+                ? 'Nothing to compact yet.'
+                : `Context compacted — ${event.message ?? 'the agent’s memory was summarized'}. Your visible chat is unchanged.`,
+            tone: 'info',
+          })
+          break
         case 'mode':
           setMode(event.mode) // the agent is the source of truth
           break
@@ -360,6 +519,15 @@ export default function Workspace({
           )
           break
         }
+        case 'preview':
+          // Agent-requested preview (preview_file / preview_url tools); a
+          // later effect opens the panel — openFile isn't defined yet here.
+          setAgentPreview((prev) => ({
+            path: event.path,
+            url: event.url,
+            nonce: (prev?.nonce ?? 0) + 1,
+          }))
+          break
         case 'reasoning_delta':
           setPhase('thinking')
           setItems((prev) => {
@@ -483,9 +651,18 @@ export default function Workspace({
   // only the affected directories in the tree.
   useEffect(() => {
     return window.codehamr.onFsChanged(({ cwd: changedCwd, dirs }) => {
-      if (changedCwd === cwd && dirs.length) reloadDirs(dirs)
+      if (changedCwd === cwd && dirs.length) {
+        reloadDirs(dirs)
+        refreshGitStat()
+      }
     })
-  }, [cwd, reloadDirs])
+  }, [cwd, reloadDirs, refreshGitStat])
+
+  // Refresh the git diff stat on load and whenever a turn finishes (the agent
+  // just edited files), plus fs:changed above catches manual/external edits.
+  useEffect(() => {
+    if (!busy) refreshGitStat()
+  }, [busy, refreshGitStat])
 
   // Elapsed ticker for the status bar: proof of life while the model is silent.
   useEffect(() => {
@@ -638,6 +815,7 @@ export default function Workspace({
 
   const openFile = useCallback(
     async (path: string): Promise<void> => {
+      openPanel('file') // stacks alongside the browser rather than replacing it
       const abs = toAbs(path)
       const r = await window.codehamr.readPreview(cwd, abs)
       switch (r.kind) {
@@ -660,8 +838,22 @@ export default function Workspace({
           break
       }
     },
-    [cwd, toAbs],
+    [cwd, toAbs, openPanel],
   )
+
+  // React to agent preview requests (preview_file / preview_url tools). File
+  // and browser now stack rather than replace, so opening one keeps the other.
+  useEffect(() => {
+    if (!agentPreview) return
+    if (agentPreview.url) {
+      setBrowserNav({ url: agentPreview.url, nonce: agentPreview.nonce })
+      setBrowserOpen(true)
+      openPanel('browser')
+    } else if (agentPreview.path) {
+      void openFile(agentPreview.path)
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [agentPreview])
 
   const addFiles = async (files: Iterable<File>): Promise<void> => {
     const results = await Promise.all([...files].map(fileToAttachment))
@@ -703,9 +895,102 @@ export default function Workspace({
     [cwd, push],
   )
 
+  // Run a slash command instead of sending a prompt. Only invoked for text
+  // whose first word is a known command (see sendPrompt), so ordinary messages
+  // that merely start with "/" (e.g. a path) still go through as prompts.
+  const runSlash = async (raw: string): Promise<void> => {
+    const [name, ...rest] = raw.trim().split(/\s+/)
+    const arg = rest.join(' ').trim()
+    switch (name) {
+      case '/compact':
+        if (!connected) return
+        if (busy) {
+          push({ kind: 'notice', id: uid(), text: 'Finish or stop the current turn before compacting.', tone: 'info' })
+          return
+        }
+        setBusy(true)
+        setPhase('waiting')
+        setTurnStart(Date.now())
+        setElapsed(0)
+        push({ kind: 'notice', id: uid(), text: 'Compacting the conversation…', tone: 'info' })
+        try {
+          await window.codehamr.send(cwd, { v: PROTOCOL_VERSION, type: 'compact' })
+        } catch (err) {
+          // A rejected send (e.g. the agent predates /compact — restart the
+          // app) must not leave the composer wedged on busy forever.
+          endTurn()
+          push({
+            kind: 'notice',
+            id: uid(),
+            text: `Couldn't start compaction: ${err instanceof Error ? err.message : String(err)}. If you just updated, fully restart the app.`,
+            tone: 'error',
+          })
+        }
+        return
+      case '/clear':
+        await window.codehamr.send(cwd, { v: PROTOCOL_VERSION, type: 'clear' })
+        return
+      case '/model':
+        if (!arg) {
+          push({
+            kind: 'notice',
+            id: uid(),
+            text: `Models: ${models.map((m) => m.name).join(', ') || '(none)'} · active: ${activeModel}. Use /model <name>.`,
+            tone: 'info',
+          })
+        } else if (models.some((m) => m.name === arg)) {
+          await window.codehamr.send(cwd, { v: PROTOCOL_VERSION, type: 'set_model', name: arg })
+        } else {
+          push({
+            kind: 'notice',
+            id: uid(),
+            text: `Unknown model "${arg}" — available: ${models.map((m) => m.name).join(', ')}`,
+            tone: 'info',
+          })
+        }
+        return
+      case '/help':
+        push({
+          kind: 'notice',
+          id: uid(),
+          text: 'Slash commands:\n' + SLASH_COMMANDS.map((c) => `  ${c.name}${c.arg ? ' ' + c.arg : ''} — ${c.desc}`).join('\n'),
+          tone: 'info',
+        })
+        return
+    }
+  }
+
+  // Palette is open while typing a command NAME (a leading "/" with no space
+  // yet) and not dismissed; once a space is typed we're in argument entry and
+  // the popover hides.
+  const slashTyping = input.startsWith('/') && !input.includes(' ') && !input.includes('\n')
+  const slashMatches = slashTyping && !slashClosed ? SLASH_COMMANDS.filter((c) => c.name.startsWith(input)) : []
+  const slashOpen = slashMatches.length > 0
+  const slashIdx = slashMatches.length ? Math.min(slashSel, slashMatches.length - 1) : 0
+  // Complete to a command: commands with an arg get a trailing space; the rest
+  // run immediately.
+  const pickSlash = (c: SlashCmd): void => {
+    if (c.arg) {
+      setInput(c.name + ' ')
+      setSlashClosed(true)
+      inputRef.current?.focus()
+    } else {
+      setInput('')
+      void runSlash(c.name)
+    }
+  }
+
   const sendPrompt = async (): Promise<void> => {
     const text = input.trim()
     if ((!text && attachments.length === 0) || !connected) return
+    // A known slash command runs instead of being sent as a prompt.
+    if (attachments.length === 0 && SLASH_COMMANDS.some((c) => c.name === text.split(/\s+/)[0])) {
+      setInput('')
+      setSlashClosed(false)
+      setSlashSel(0)
+      await runSlash(text)
+      return
+    }
     const atts = attachments
     setInput('')
     setAttachments([])
@@ -777,6 +1062,54 @@ export default function Workspace({
     })
   }
 
+  // --- Composer right-click clipboard actions. Each works off the selection
+  // captured when the menu opened, then restores focus + caret. -------------
+  const restoreCaret = (pos: number): void => {
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (el) {
+        el.focus()
+        el.selectionStart = el.selectionEnd = pos
+      }
+    })
+  }
+  const copyInput = (): void => {
+    if (!inputMenu) return
+    const sel = input.slice(inputMenu.start, inputMenu.end)
+    if (sel) void window.codehamr.writeClipboard(sel)
+    setInputMenu(null)
+  }
+  const cutInput = (): void => {
+    if (!inputMenu) return
+    const { start, end } = inputMenu
+    const sel = input.slice(start, end)
+    if (sel) {
+      void window.codehamr.writeClipboard(sel)
+      setInput(input.slice(0, start) + input.slice(end))
+      restoreCaret(start)
+    }
+    setInputMenu(null)
+  }
+  const pasteInput = async (): Promise<void> => {
+    if (!inputMenu) return
+    const { start, end } = inputMenu
+    const text = await window.codehamr.readClipboard()
+    setInputMenu(null)
+    if (!text) return
+    setInput(input.slice(0, start) + text + input.slice(end))
+    restoreCaret(start + text.length)
+  }
+  const selectAllInput = (): void => {
+    setInputMenu(null)
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (el) {
+        el.focus()
+        el.select()
+      }
+    })
+  }
+
   const switchMode = async (next: PermissionMode): Promise<void> => {
     if (busy || next === mode) return
     modeRef.current = next // 'ready' after a restart must see the new choice
@@ -788,20 +1121,116 @@ export default function Workspace({
     (it) => it.kind === 'tool' && it.status === 'pending_approval',
   )
 
-  // Transcript search: filter view over the item's searchable text (never the
-  // base64 image payloads — they'd false-match almost any query).
-  const itemText = (it: Item): string => {
-    switch (it.kind) {
-      case 'tool':
-        return `${it.name} ${JSON.stringify(it.args)} ${it.output ?? ''} ${it.diff?.unifiedDiff ?? ''}`
-      default:
-        return it.text
+  // Search modal: matches user/assistant messages; clicking a result jumps to
+  // (and briefly flashes) the message in the transcript. The transcript itself
+  // always shows everything — no inline filtering.
+  const trimmedQuery = query.trim().toLowerCase()
+  const searchResults = trimmedQuery
+    ? items
+        .filter(
+          (it): it is Extract<Item, { kind: 'user' | 'assistant' }> =>
+            (it.kind === 'user' || it.kind === 'assistant') &&
+            it.text.toLowerCase().includes(trimmedQuery),
+        )
+        .slice(0, 50)
+    : []
+  const [flashId, setFlashId] = useState<string | null>(null)
+  const flashTimer = useRef<number | undefined>(undefined)
+  const jumpToMessage = (id: string): void => {
+    setSearchOpen(false)
+    scrollToMessage(id)
+    setFlashId(id)
+    window.clearTimeout(flashTimer.current)
+    flashTimer.current = window.setTimeout(() => setFlashId(null), 1600)
+  }
+
+  // Consecutive tool calls collapse into one group card (agents often chain
+  // several reads/writes back to back); anything else renders as itself.
+  const rendered = useMemo(() => {
+    const out: ({ kind: 'item'; item: Item } | { kind: 'group'; id: string; tools: ToolItem[] })[] =
+      []
+    for (const it of items) {
+      const prev = out[out.length - 1]
+      if (it.kind === 'tool' && prev?.kind === 'group') {
+        prev.tools.push(it)
+      } else if (it.kind === 'tool') {
+        out.push({ kind: 'group', id: `g-${it.id}`, tools: [it] })
+      } else {
+        out.push({ kind: 'item', item: it })
+      }
+    }
+    return out
+  }, [items])
+
+  const pinned = items.filter(
+    (it): it is Extract<Item, { kind: 'user' | 'assistant' }> =>
+      (it.kind === 'user' || it.kind === 'assistant') && !!it.pinned,
+  )
+
+  const togglePin = (id: string): void => {
+    setItems((prev) =>
+      prev.map((it) =>
+        it.id === id && (it.kind === 'user' || it.kind === 'assistant')
+          ? { ...it, pinned: !it.pinned }
+          : it,
+      ),
+    )
+  }
+
+  const copyMessage = (id: string): void => {
+    const it = items.find((i) => i.id === id)
+    if (it && (it.kind === 'user' || it.kind === 'assistant')) {
+      void navigator.clipboard.writeText(it.text)
+      showToast('message copied')
     }
   }
-  const trimmedQuery = query.trim().toLowerCase()
-  const shown = trimmedQuery
-    ? items.filter((it) => itemText(it).toLowerCase().includes(trimmedQuery))
-    : items
+
+  const scrollToMessage = (id: string): void => {
+    document.getElementById(`msg-${id}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+  }
+
+  // Any click or Escape dismisses the message context menu.
+  useEffect(() => {
+    if (!msgMenu) return
+    const close = (): void => setMsgMenu(null)
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') close()
+    }
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [msgMenu])
+
+  // Any click or Escape dismisses the composer clipboard menu.
+  useEffect(() => {
+    if (!inputMenu) return
+    const close = (): void => setInputMenu(null)
+    const onKey = (e: KeyboardEvent): void => {
+      if (e.key === 'Escape') close()
+    }
+    window.addEventListener('click', close)
+    window.addEventListener('keydown', onKey)
+    return () => {
+      window.removeEventListener('click', close)
+      window.removeEventListener('keydown', onKey)
+    }
+  }, [inputMenu])
+
+  // Clicking anywhere else closes the compact-bar burger menu. The toggle
+  // button's own click fires first (bubbles later), so this runs after it.
+  useEffect(() => {
+    if (!barMenuOpen) return
+    const close = (): void => setBarMenuOpen(false)
+    // Defer so the opening click doesn't immediately close it.
+    const id = window.setTimeout(() => window.addEventListener('click', close), 0)
+    return () => {
+      window.clearTimeout(id)
+      window.removeEventListener('click', close)
+    }
+  }, [barMenuOpen])
 
   // Keyboard shortcuts, active tab only.
   useEffect(() => {
@@ -821,7 +1250,7 @@ export default function Workspace({
           setSearchOpen(false)
           setQuery('')
         } else if (viewer) {
-          setViewer(null)
+          closeViewer()
         }
       }
     }
@@ -853,26 +1282,109 @@ export default function Workspace({
         </div>
       )}
 
-      <div className="relative flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
-        <button
-          onClick={() => void newChat()}
-          disabled={!connected || busy}
-          title="start a fresh conversation (this one is kept in History)"
-          className="rounded bg-zinc-800 px-2.5 py-0.5 text-xs hover:bg-zinc-700 disabled:opacity-40"
-        >
-          New chat
-        </button>
-        <button
-          onClick={() => {
-            setHistoryOpen((o) => !o)
-            if (!historyOpen) void loadChats()
-          }}
-          disabled={busy}
-          title={busy ? 'finish or cancel the turn first' : 'previous chats in this project'}
-          className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 disabled:opacity-40 ${historyOpen ? 'bg-zinc-700' : 'bg-zinc-800'}`}
-        >
-          History
-        </button>
+      <div ref={barRef} className="relative flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
+        {compactBar ? (
+          <div className="relative">
+            <button
+              onClick={() => setBarMenuOpen((o) => !o)}
+              title="menu"
+              className={`rounded p-1 hover:bg-zinc-700 ${barMenuOpen ? 'bg-zinc-700' : 'bg-zinc-800'}`}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="h-3.5 w-3.5 text-zinc-300"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
+                <path d="M4 6h16M4 12h16M4 18h16" />
+              </svg>
+            </button>
+            {barMenuOpen && (
+              <div className="absolute top-full left-0 z-30 mt-1 w-44 rounded border border-zinc-700 bg-zinc-900 py-1 text-xs shadow-xl">
+                <BarMenuItem onClick={() => setShowAppearance(true)} close={setBarMenuOpen}>
+                  Appearance…
+                </BarMenuItem>
+                <BarMenuItem
+                  disabled={!connected || busy}
+                  onClick={() => void newChat()}
+                  close={setBarMenuOpen}
+                >
+                  New chat
+                </BarMenuItem>
+                <BarMenuItem
+                  disabled={busy}
+                  onClick={() => {
+                    setHistoryOpen(true)
+                    void loadChats()
+                  }}
+                  close={setBarMenuOpen}
+                >
+                  History…
+                </BarMenuItem>
+                <BarMenuItem onClick={() => setShowFiles((s) => !s)} close={setBarMenuOpen}>
+                  {showFiles ? '✓ ' : ''}Files panel
+                </BarMenuItem>
+                <BarMenuItem
+                  onClick={() => {
+                    if (browserOpen) closeBrowser()
+                    else {
+                      setBrowserOpen(true)
+                      openPanel('browser')
+                    }
+                  }}
+                  close={setBarMenuOpen}
+                >
+                  {browserOpen ? '✓ ' : ''}Browser
+                </BarMenuItem>
+                <BarMenuItem onClick={() => setSearchOpen(true)} close={setBarMenuOpen}>
+                  Search…
+                </BarMenuItem>
+              </div>
+            )}
+          </div>
+        ) : (
+          <>
+            <button
+              onClick={() => setShowAppearance(true)}
+              title="appearance — theme & accessibility"
+              className="rounded bg-zinc-800 p-1 hover:bg-zinc-700"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="h-3.5 w-3.5 text-zinc-300"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
+                <path d="M4 7h9M19 7h1M4 17h1M11 17h9" />
+                <circle cx="16" cy="7" r="2.2" />
+                <circle cx="8" cy="17" r="2.2" />
+              </svg>
+            </button>
+            <button
+              onClick={() => void newChat()}
+              disabled={!connected || busy}
+              title="start a fresh conversation (this one is kept in History)"
+              className="rounded bg-zinc-800 px-2.5 py-0.5 text-xs hover:bg-zinc-700 disabled:opacity-40"
+            >
+              New chat
+            </button>
+            <button
+              onClick={() => {
+                setHistoryOpen((o) => !o)
+                if (!historyOpen) void loadChats()
+              }}
+              disabled={busy}
+              title={busy ? 'finish or cancel the turn first' : 'previous chats in this project'}
+              className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 disabled:opacity-40 ${historyOpen ? 'bg-zinc-700' : 'bg-zinc-800'}`}
+            >
+              History
+            </button>
+          </>
+        )}
         {historyOpen && (
           <div className="absolute top-full left-3 z-20 mt-1 max-h-80 w-96 overflow-y-auto rounded border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
             {chats.map((c) => (
@@ -914,118 +1426,113 @@ export default function Workspace({
             )}
           </div>
         )}
-        <button
-          onClick={() => setShowFiles((s) => !s)}
-          title={
-            showFiles && layout.tree.mode === 'hidden'
-              ? 'file tree hidden — window too narrow (widen to show)'
-              : 'toggle the file tree (Ctrl+B)'
-          }
-          className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 ${
-            showFiles
-              ? layout.tree.mode === 'hidden'
-                ? 'bg-zinc-800 text-zinc-500 italic' // wants to show but collapsed by width
-                : 'bg-zinc-700'
-              : 'bg-zinc-800'
-          }`}
-        >
-          Files
-        </button>
-        {searchOpen ? (
-          <span className="flex items-center gap-1.5">
-            <input
-              autoFocus
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="search transcript… (Esc closes)"
-              className="w-56 rounded border border-zinc-700 bg-zinc-900 px-2 py-0.5 text-xs outline-none focus:border-zinc-500"
-            />
-            {trimmedQuery && (
-              <span className="text-[11px] text-zinc-500">
-                {shown.length} match{shown.length === 1 ? '' : 'es'}
-              </span>
-            )}
-          </span>
-        ) : (
-          <button
-            onClick={() => setSearchOpen(true)}
-            title="search transcript (Ctrl+F)"
-            className="rounded bg-zinc-800 px-2.5 py-0.5 text-xs hover:bg-zinc-700"
-          >
-            Search
-          </button>
-        )}
-        <div className="ml-auto flex items-center gap-2 text-xs text-zinc-400">
-          <span
-            className="flex overflow-hidden rounded border border-zinc-700"
-            title={
-              busy
-                ? 'finish or cancel the turn first'
-                : 'Ask: approve each bash/write/edit. Auto: the agent runs them unattended.'
-            }
-          >
-            {(['ask', 'auto'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => void switchMode(m)}
-                disabled={busy}
-                className={`px-2 py-0.5 disabled:opacity-50 ${
-                  mode === m
-                    ? m === 'auto'
-                      ? 'bg-amber-700 text-amber-50'
-                      : 'bg-zinc-700 text-zinc-100'
-                    : 'bg-zinc-900 hover:bg-zinc-800'
-                }`}
-              >
-                {m === 'ask' ? 'Ask' : 'Auto'}
-              </button>
-            ))}
-          </span>
-          {models.length > 0 && (
-            <select
-              value={activeModel}
-              onChange={(e) => void switchModel(e.target.value)}
-              disabled={busy}
-              title={busy ? 'cannot switch models mid-turn' : 'switch model profile'}
-              className="rounded bg-zinc-800 px-2 py-0.5 outline-none hover:bg-zinc-700 disabled:opacity-50"
+        {!compactBar && (
+          <>
+            <button
+              onClick={() => setShowFiles((s) => !s)}
+              title={
+                showFiles && layout.tree.mode === 'hidden'
+                  ? 'file tree hidden — window too narrow (widen to show)'
+                  : 'toggle the file tree (Ctrl+B)'
+              }
+              className={`rounded px-2.5 py-0.5 text-xs hover:bg-zinc-700 ${
+                showFiles
+                  ? layout.tree.mode === 'hidden'
+                    ? 'bg-zinc-800 text-zinc-500 italic' // wants to show but collapsed by width
+                    : 'bg-zinc-700'
+                  : 'bg-zinc-800'
+              }`}
             >
-              {models.map((m) => (
-                <option key={m.name} value={m.name}>
-                  {m.name} · {m.llm}
-                </option>
-              ))}
-            </select>
+              Files
+            </button>
+            <button
+              onClick={() => {
+                if (browserOpen) closeBrowser()
+                else {
+                  setBrowserOpen(true)
+                  openPanel('browser') // stacks with the file preview
+                }
+              }}
+              title="live browser preview (localhost etc.)"
+              className={`rounded p-1 hover:bg-zinc-700 ${browserOpen ? 'bg-zinc-700' : 'bg-zinc-800'}`}
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="h-3.5 w-3.5 text-zinc-300"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="1.8"
+              >
+                <circle cx="12" cy="12" r="9" />
+                <path d="M3 12h18M12 3a14 14 0 0 1 0 18M12 3a14 14 0 0 0 0 18" />
+              </svg>
+            </button>
+            <button
+              onClick={() => setSearchOpen(true)}
+              title="search chat messages (Ctrl+F)"
+              className="rounded bg-zinc-800 p-1 hover:bg-zinc-700"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="h-3.5 w-3.5 text-zinc-300"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+              >
+                <circle cx="11" cy="11" r="7" />
+                <path d="m20.5 20.5-4.2-4.2" />
+              </svg>
+            </button>
+          </>
+        )}
+        <div className="relative ml-auto flex items-center gap-2 text-xs text-zinc-400">
+          {diffStats && (diffStats.added > 0 || diffStats.removed > 0) && (
+            <div
+              title="git diff — lines changed in the working tree vs HEAD"
+              className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900/50 px-2 py-0.5 font-mono"
+            >
+              {currentBranch && (
+                <span className="text-sky-400 shrink-0" title="current branch">
+                  {currentBranch}
+                </span>
+              )}
+              {diffStats.added > 0 && (
+                <span className="text-emerald-400">+{diffStats.added.toLocaleString()}</span>
+              )}
+              {diffStats.removed > 0 && (
+                <span className="text-red-400">-{diffStats.removed.toLocaleString()}</span>
+              )}
+            </div>
           )}
-          <button
-            onClick={() => setShowSettings(true)}
-            title="model profiles & endpoints"
-            className="rounded px-1.5 py-0.5 hover:bg-zinc-800"
-          >
-            ⚙
-          </button>
-          <span
-            className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-zinc-600'}`}
-            title={connected ? 'agent connected' : 'agent not running'}
-          />
+          {pinned.length > 0 && (
+            <button
+              onClick={() => setPinsOpen((o) => !o)}
+              title="pinned messages"
+              className={`rounded px-1.5 py-0.5 hover:bg-zinc-700 ${pinsOpen ? 'bg-zinc-700' : 'bg-zinc-800'}`}
+            >
+              📌 {pinned.length}
+            </button>
+          )}
+          {pinsOpen && pinned.length > 0 && (
+            <div className="absolute top-full right-0 z-20 mt-1 max-h-72 w-80 overflow-y-auto rounded border border-zinc-700 bg-zinc-900 py-1 shadow-xl">
+              {pinned.map((p) => (
+                <button
+                  key={p.id}
+                  onClick={() => {
+                    setPinsOpen(false)
+                    scrollToMessage(p.id)
+                  }}
+                  className="flex w-full items-start gap-2 px-3 py-1.5 text-left text-xs text-zinc-300 hover:bg-zinc-800"
+                >
+                  <span className="shrink-0 text-zinc-500">{p.kind === 'user' ? 'you' : 'agent'}</span>
+                  <span className="line-clamp-2">{p.text.slice(0, 160)}</span>
+                </button>
+              ))}
+            </div>
+          )}
         </div>
       </div>
-
-      {mode === 'auto' && (
-        <div className="flex items-center gap-2 border-b border-amber-900/60 bg-amber-950/40 px-3 py-1 text-[11px] text-amber-300">
-          <span>⚠</span>
-          <span>
-            Auto mode — the agent runs bash commands and file writes in{' '}
-            <span className="font-mono">{basename(cwd)}</span> without asking. Cancel anytime.
-          </span>
-          <button
-            onClick={() => void switchMode('ask')}
-            disabled={busy}
-            className="ml-auto rounded bg-amber-900/60 px-2 py-0.5 hover:bg-amber-900 disabled:opacity-50"
-          >
-            switch to Ask
-          </button>
-        </div>
-      )}
 
       {showSettings && (
         <SettingsPanel
@@ -1068,25 +1575,65 @@ export default function Workspace({
         )}
 
         <div className="flex min-w-0 flex-1 flex-col">
-          <div ref={scrollRef} className="flex-1 space-y-3 overflow-y-auto px-4 py-4">
+          <div
+            ref={scrollRef}
+            // Compact (narrow) view: let bubbles fill the width and trim the
+            // side padding, so a cramped column isn't wasting space on a cap.
+            style={{ '--msg-max': compactBar ? '100%' : '85%' } as React.CSSProperties}
+            className={`flex-1 space-y-3 overflow-y-auto py-4 ${compactBar ? 'px-2' : 'px-4'}`}
+          >
             {items.length === 0 && (
               <p className="mt-24 text-center text-sm text-zinc-500">
                 {connected ? 'Ready. Ask the agent something.' : 'Starting agent…'}
               </p>
             )}
-            {items.length > 0 && shown.length === 0 && (
-              <p className="mt-24 text-center text-sm text-zinc-500">
-                nothing matches “{query.trim()}”
-              </p>
+            {rendered.map((r) =>
+              r.kind === 'group' ? (
+                <ToolGroupCard
+                  key={r.id}
+                  tools={r.tools}
+                  onDecide={decide}
+                  onOpenFile={(p) => void openFile(p)}
+                />
+              ) : (
+                <div
+                  key={r.item.id}
+                  id={`msg-${r.item.id}`}
+                  className={
+                    flashId === r.item.id
+                      ? 'rounded-lg ring-2 ring-sky-500/60 transition-shadow'
+                      : ''
+                  }
+                  onContextMenu={
+                    r.item.kind === 'user' || r.item.kind === 'assistant'
+                      ? (e) => {
+                          e.preventDefault()
+                          setMsgMenu({
+                            x: Math.min(e.clientX, window.innerWidth - 180),
+                            y: Math.min(e.clientY, window.innerHeight - 90),
+                            id: r.item.id,
+                          })
+                        }
+                      : undefined
+                  }
+                >
+                  {(r.item.kind === 'user' || r.item.kind === 'assistant') && r.item.pinned && (
+                    <div
+                      className={`mb-0.5 flex items-center gap-1 text-[10px] text-amber-400/90 ${
+                        r.item.kind === 'user' ? 'justify-end' : ''
+                      }`}
+                    >
+                      <span>📌 pinned</span>
+                    </div>
+                  )}
+                  <TranscriptItem
+                    item={r.item}
+                    onDecide={decide}
+                    onOpenFile={(p) => void openFile(p)}
+                  />
+                </div>
+              ),
             )}
-            {shown.map((item) => (
-              <TranscriptItem
-                key={item.id}
-                item={item}
-                onDecide={decide}
-                onOpenFile={(p) => void openFile(p)}
-              />
-            ))}
           </div>
 
           {busy && (
@@ -1160,11 +1707,117 @@ export default function Workspace({
                 )}
               </div>
             )}
-            <div className="flex gap-2">
+            <div className="mb-2 flex items-center gap-2 text-xs text-zinc-400">
+              <span
+                className="flex overflow-hidden rounded border border-zinc-700"
+                title={
+                  busy
+                    ? 'finish or cancel the turn first'
+                    : 'Ask: approve each bash/write/edit. Auto: the agent runs them unattended.'
+                }
+              >
+                {(['ask', 'auto'] as const).map((m) => (
+                  <button
+                    key={m}
+                    onClick={() => void switchMode(m)}
+                    disabled={busy}
+                    className={`px-2 py-0.5 disabled:opacity-50 ${
+                      mode === m
+                        ? m === 'auto'
+                          ? 'bg-amber-700 text-amber-50'
+                          : 'bg-zinc-700 text-zinc-100'
+                        : 'bg-zinc-900 hover:bg-zinc-800'
+                    }`}
+                  >
+                    {m === 'ask' ? 'Ask' : 'Auto'}
+                  </button>
+                ))}
+              </span>
+              {mode === 'auto' && (
+                <span
+                  className="text-[11px] text-amber-400/80"
+                  title={`the agent runs bash commands and file writes in ${basename(cwd)} without asking — cancel anytime`}
+                >
+                  ⚠ runs without asking
+                </span>
+              )}
+              <div className="ml-auto flex items-center gap-2">
+                {models.length > 0 && (
+                  <select
+                    value={activeModel}
+                    onChange={(e) => void switchModel(e.target.value)}
+                    disabled={busy}
+                    title={busy ? 'cannot switch models mid-turn' : 'switch model profile'}
+                    className="rounded bg-zinc-800 px-2 py-0.5 outline-none hover:bg-zinc-700 disabled:opacity-50"
+                  >
+                    {models.map((m) => (
+                      <option key={m.name} value={m.name}>
+                        {m.name} · {m.llm}
+                      </option>
+                    ))}
+                  </select>
+                )}
+                <button
+                  onClick={() => setShowSettings(true)}
+                  title="model profiles & endpoints"
+                  className="rounded px-1.5 py-0.5 hover:bg-zinc-800"
+                >
+                  ⚙
+                </button>
+                <span
+                  className={`h-2 w-2 rounded-full ${connected ? 'bg-emerald-500' : 'bg-zinc-600'}`}
+                  title={connected ? 'agent connected' : 'agent not running'}
+                />
+              </div>
+            </div>
+            <div className="relative flex gap-2">
+              {slashOpen && (
+                <div className="absolute bottom-full left-0 mb-2 w-full max-w-md overflow-hidden rounded-md border border-zinc-700 bg-zinc-900 shadow-xl">
+                  {slashMatches.map((c, i) => (
+                    <button
+                      key={c.name}
+                      // mousedown (not click) so the textarea doesn't blur first.
+                      onMouseDown={(e) => {
+                        e.preventDefault()
+                        pickSlash(c)
+                      }}
+                      onMouseEnter={() => setSlashSel(i)}
+                      className={`flex w-full items-center justify-between gap-3 px-3 py-1.5 text-left text-xs ${
+                        i === slashIdx ? 'bg-zinc-800' : ''
+                      } hover:bg-zinc-800`}
+                    >
+                      <span className="font-mono text-zinc-200">
+                        {c.name}
+                        {c.arg ? <span className="text-zinc-500"> {c.arg}</span> : null}
+                      </span>
+                      <span className="truncate text-zinc-500">{c.desc}</span>
+                    </button>
+                  ))}
+                </div>
+              )}
               <textarea
                 ref={inputRef}
                 value={input}
-                onChange={(e) => setInput(e.target.value)}
+                onChange={(e) => {
+                  setInput(e.target.value)
+                  setSlashSel(0)
+                  setSlashClosed(false)
+                }}
+                onContextMenu={(e) => {
+                  e.preventDefault()
+                  const el = e.currentTarget
+                  // The composer is at the bottom of the window, so a menu drawn
+                  // downward from the cursor overflows off-screen — clamp both
+                  // axes to keep the whole menu inside the viewport.
+                  const MENU_W = 160
+                  const MENU_H = 140
+                  setInputMenu({
+                    x: Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_W - 8)),
+                    y: Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_H - 8)),
+                    start: el.selectionStart ?? 0,
+                    end: el.selectionEnd ?? 0,
+                  })
+                }}
                 onPaste={(e) => {
                   const files = [...e.clipboardData.items]
                     .filter((it) => it.kind === 'file')
@@ -1176,6 +1829,31 @@ export default function Workspace({
                   }
                 }}
                 onKeyDown={(e) => {
+                  // Palette navigation takes over the arrow/Tab/Enter/Escape keys
+                  // while the command list is showing.
+                  if (slashOpen) {
+                    if (e.key === 'ArrowDown') {
+                      e.preventDefault()
+                      setSlashSel((s) => (Math.min(s, slashMatches.length - 1) + 1) % slashMatches.length)
+                      return
+                    }
+                    if (e.key === 'ArrowUp') {
+                      e.preventDefault()
+                      setSlashSel((s) => (Math.min(s, slashMatches.length - 1) - 1 + slashMatches.length) % slashMatches.length)
+                      return
+                    }
+                    if (e.key === 'Escape') {
+                      e.preventDefault()
+                      setSlashClosed(true)
+                      return
+                    }
+                    if (e.key === 'Tab' || (e.key === 'Enter' && !e.shiftKey)) {
+                      e.preventDefault()
+                      const pick = slashMatches[slashIdx]
+                      if (pick) pickSlash(pick)
+                      return
+                    }
+                  }
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
                     void sendPrompt()
@@ -1195,17 +1873,35 @@ export default function Workspace({
               <button
                 onClick={() => void sendPrompt()}
                 disabled={!connected || (input.trim() === '' && attachments.length === 0)}
-                className={`rounded px-4 text-sm font-medium disabled:opacity-40 ${
+                title={busy ? 'queue — sends when the current turn finishes' : 'send (Enter)'}
+                className={`flex items-center justify-center rounded px-3 disabled:opacity-40 ${
                   busy ? 'bg-zinc-700 hover:bg-zinc-600' : 'bg-emerald-700 hover:bg-emerald-600'
                 }`}
               >
-                {busy ? 'Queue' : 'Send'}
+                {busy ? (
+                  // queue: list with a plus
+                  <svg
+                    viewBox="0 0 24 24"
+                    className="h-4 w-4"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2"
+                    strokeLinecap="round"
+                  >
+                    <path d="M4 6h16M4 12h9M4 18h9M18 14v6M15 17h6" />
+                  </svg>
+                ) : (
+                  // send: paper plane
+                  <svg viewBox="0 0 24 24" className="h-4 w-4" fill="currentColor">
+                    <path d="M3.4 20.4 22 12 3.4 3.6l-.01 6.53L16 12 3.39 13.87z" />
+                  </svg>
+                )}
               </button>
             </div>
           </footer>
         </div>
 
-        {viewer && layout.preview.mode === 'inline' && (
+        {previewInUse && layout.preview.mode === 'inline' && (
           <>
             <ResizeHandle
               // Handle sits left of the preview: dragging left widens it.
@@ -1213,17 +1909,164 @@ export default function Workspace({
                 setPreviewWidth((w) => clamp(w - dx, PREVIEW_MIN, window.innerWidth - 360))
               }
             />
-            <div style={{ width: layout.preview.width }} className="flex shrink-0">
-              <FilePreview
-                preview={viewer}
-                workspaceRoot={cwd}
-                onClose={() => setViewer(null)}
-                onUseInPrompt={useSnippetInPrompt}
-              />
+            <div
+              ref={previewSlotRef}
+              style={{ width: layout.preview.width }}
+              className="flex shrink-0 flex-col overflow-hidden"
+            >
+              {panelOrder.map((p, i) => {
+                const both = panelOrder.length === 2
+                const isTop = i === 0
+                const flex = both
+                  ? { flexGrow: isTop ? splitRatio : 1 - splitRatio, flexShrink: 1, flexBasis: 0 }
+                  : { flex: '1 1 0' }
+                return (
+                  <Fragment key={p}>
+                    {i > 0 && <RowResizeHandle onResize={adjustSplit} />}
+                    <div className="flex min-h-0 min-w-0" style={{ ...flex, minHeight: both ? 160 : 0 }}>
+                      {p === 'file'
+                        ? viewer && (
+                            <FilePreview
+                              preview={viewer}
+                              workspaceRoot={cwd}
+                              onClose={closeViewer}
+                              onUseInPrompt={useSnippetInPrompt}
+                            />
+                          )
+                        : browserOpen && (
+                            <BrowserPane cwd={cwd} navigate={browserNav} onClose={closeBrowser} />
+                          )}
+                    </div>
+                  </Fragment>
+                )
+              })}
             </div>
           </>
         )}
       </div>
+
+      {showAppearance && <AppearanceModal onClose={() => setShowAppearance(false)} />}
+
+      {searchOpen && (
+        <div
+          className="fixed inset-0 z-40 flex items-start justify-center bg-black/50 pt-24"
+          onClick={() => setSearchOpen(false)}
+        >
+          <div
+            className="w-[560px] max-w-[90vw] overflow-hidden rounded-lg border border-zinc-700 bg-zinc-900 shadow-2xl"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <input
+              autoFocus
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && searchResults.length > 0) {
+                  jumpToMessage(searchResults[0].id)
+                }
+              }}
+              placeholder="search chat messages… (Enter jumps to the first match)"
+              className="w-full border-b border-zinc-800 bg-transparent px-4 py-3 text-sm outline-none"
+            />
+            <div className="max-h-80 overflow-y-auto py-1">
+              {searchResults.map((m) => {
+                const idx = m.text.toLowerCase().indexOf(trimmedQuery)
+                const from = Math.max(0, idx - 40)
+                const snippet =
+                  (from > 0 ? '…' : '') + m.text.slice(from, from + 160).replace(/\s+/g, ' ')
+                return (
+                  <button
+                    key={m.id}
+                    onClick={() => jumpToMessage(m.id)}
+                    className="flex w-full items-start gap-2 px-4 py-2 text-left text-xs hover:bg-zinc-800"
+                  >
+                    <span
+                      className={`w-10 shrink-0 pt-0.5 text-[10px] ${
+                        m.kind === 'user' ? 'text-emerald-400' : 'text-zinc-500'
+                      }`}
+                    >
+                      {m.kind === 'user' ? 'you' : 'agent'}
+                    </span>
+                    <span className="line-clamp-2 text-zinc-300">{snippet}</span>
+                  </button>
+                )
+              })}
+              {trimmedQuery && searchResults.length === 0 && (
+                <p className="px-4 py-3 text-xs text-zinc-500">no messages match</p>
+              )}
+              {!trimmedQuery && (
+                <p className="px-4 py-3 text-xs text-zinc-600">
+                  type to search this chat — click a result to jump to it
+                </p>
+              )}
+            </div>
+          </div>
+        </div>
+      )}
+
+      {msgMenu && (
+        <div
+          style={{ left: msgMenu.x, top: msgMenu.y }}
+          className="fixed z-50 w-44 rounded-md border border-zinc-700 bg-zinc-900 py-1 text-xs shadow-xl"
+        >
+          <button
+            onClick={() => copyMessage(msgMenu.id)}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800"
+          >
+            <span className="w-4 text-center">⧉</span> Copy message
+          </button>
+          <button
+            onClick={() => togglePin(msgMenu.id)}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800"
+          >
+            <span className="w-4 text-center">📌</span>
+            {items.find((i) => i.id === msgMenu.id && (i.kind === 'user' || i.kind === 'assistant') && i.pinned)
+              ? 'Unpin message'
+              : 'Pin message'}
+          </button>
+        </div>
+      )}
+
+      {inputMenu && (
+        <div
+          style={{ left: inputMenu.x, top: inputMenu.y }}
+          className="fixed z-50 w-40 rounded-md border border-zinc-700 bg-zinc-900 py-1 text-xs shadow-xl"
+        >
+          <button
+            onClick={cutInput}
+            disabled={inputMenu.start === inputMenu.end}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <span className="flex items-center gap-2">
+              <span className="w-4 text-center">✂</span> Cut
+            </span>
+          </button>
+          <button
+            onClick={copyInput}
+            disabled={inputMenu.start === inputMenu.end}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800 disabled:opacity-40 disabled:hover:bg-transparent"
+          >
+            <span className="flex items-center gap-2">
+              <span className="w-4 text-center">⧉</span> Copy
+            </span>
+          </button>
+          <button
+            onClick={() => void pasteInput()}
+            className="flex w-full items-center justify-between px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800"
+          >
+            <span className="flex items-center gap-2">
+              <span className="w-4 text-center">📋</span> Paste
+            </span>
+          </button>
+          <div className="my-1 border-t border-zinc-800" />
+          <button
+            onClick={selectAllInput}
+            className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-zinc-300 hover:bg-zinc-800"
+          >
+            <span className="w-4 text-center">▦</span> Select all
+          </button>
+        </div>
+      )}
 
       {toast && (
         <div className="pointer-events-none absolute bottom-24 left-1/2 z-30 -translate-x-1/2">
@@ -1323,7 +2166,7 @@ function TranscriptItem({
   switch (item.kind) {
     case 'user':
       return (
-        <div className="ml-auto max-w-[80%] rounded-lg bg-emerald-900/40 px-3 py-2 text-sm">
+        <div className="ml-auto w-fit max-w-[var(--msg-max,85%)] rounded-lg bg-emerald-900/40 px-3 py-2 text-sm">
           {item.images && item.images.length > 0 && (
             <div className="mb-1.5 flex flex-wrap gap-1.5">
               {item.images.map((src, i) => (
@@ -1348,7 +2191,7 @@ function TranscriptItem({
       )
     case 'assistant':
       return (
-        <div className="max-w-[85%] rounded-lg bg-zinc-900 px-3 py-2 text-sm">
+        <div className="w-fit max-w-[var(--msg-max,85%)] rounded-lg bg-zinc-900 px-3 py-2 text-sm">
           <Markdown text={item.text} />
           {item.streaming && <span className="animate-pulse text-zinc-500"> ▍</span>}
         </div>
@@ -1382,7 +2225,7 @@ function ReasoningCard({
   const [open, setOpen] = useState(false)
   const expanded = item.streaming || open
   return (
-    <div className="max-w-[85%] rounded-lg border border-zinc-800/60 bg-zinc-900/40 text-xs text-zinc-500">
+    <div className="max-w-[var(--msg-max,85%)] rounded-lg border border-zinc-800/60 bg-zinc-900/40 text-xs text-zinc-500">
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-3 py-1.5 text-left"
@@ -1414,19 +2257,23 @@ function ToolCard({
   item,
   onDecide,
   onOpenFile,
+  embedded = false,
 }: {
   item: Extract<Item, { kind: 'tool' }>
   onDecide: Decide
   onOpenFile: (path: string) => void
+  embedded?: boolean
 }): React.JSX.Element {
   const [open, setOpen] = useState(false)
   const summary =
     item.name === 'bash'
       ? String(item.args.cmd ?? '')
-      : String(item.args.path ?? JSON.stringify(item.args))
+      : String(item.args.path ?? item.args.url ?? JSON.stringify(item.args))
 
   return (
-    <div className="max-w-[85%] rounded-lg border border-zinc-800 bg-zinc-900/60 text-sm">
+    <div
+      className={`${embedded ? '' : 'max-w-[var(--msg-max,85%)]'} rounded-lg border border-zinc-800 bg-zinc-900/60 text-sm`}
+    >
       <button
         onClick={() => setOpen((o) => !o)}
         className="flex w-full items-center gap-2 px-3 py-2 text-left"
@@ -1482,6 +2329,59 @@ function ToolCard({
 }
 
 /**
+ * ToolGroupCard: consecutive tool calls collapse into one summary row —
+ * agents often chain many reads/greps back to back and the transcript drowns
+ * in cards. Click to reveal the individual calls. Forced open while any call
+ * inside still needs approval or is running (Allow/Deny must stay reachable).
+ */
+function ToolGroupCard({
+  tools,
+  onDecide,
+  onOpenFile,
+}: {
+  tools: ToolItem[]
+  onDecide: Decide
+  onOpenFile: (path: string) => void
+}): React.JSX.Element {
+  const [open, setOpen] = useState(false)
+  if (tools.length === 1) {
+    return <ToolCard item={tools[0]} onDecide={onDecide} onOpenFile={onOpenFile} />
+  }
+  const active = tools.some((t) => t.status === 'pending_approval' || t.status === 'running')
+  const expanded = open || active
+  const failed = tools.filter((t) => t.status === 'failed' || t.status === 'denied').length
+  const names = [...new Set(tools.map((t) => t.name))].join(', ')
+  return (
+    <div className="max-w-[var(--msg-max,85%)] rounded-lg border border-zinc-800 bg-zinc-900/40 text-sm">
+      <button
+        onClick={() => setOpen((o) => !o)}
+        className="flex w-full items-center gap-2 px-3 py-2 text-left"
+      >
+        <span className="text-xs text-zinc-500">{expanded ? '▾' : '▸'}</span>
+        <span className="text-xs text-zinc-300">
+          {tools.length} tool call{tools.length === 1 ? '' : 's'}
+        </span>
+        <span className="truncate font-mono text-xs text-zinc-500">{names}</span>
+        <span
+          className={`ml-auto shrink-0 text-xs ${
+            active ? 'text-zinc-400' : failed > 0 ? 'text-red-400' : 'text-emerald-400'
+          }`}
+        >
+          {active ? 'working…' : failed > 0 ? `${failed} failed` : 'done'}
+        </span>
+      </button>
+      {expanded && (
+        <div className="space-y-2 border-t border-zinc-800 p-2">
+          {tools.map((t) => (
+            <ToolCard key={t.id} item={t} onDecide={onDecide} onOpenFile={onOpenFile} embedded />
+          ))}
+        </div>
+      )}
+    </div>
+  )
+}
+
+/**
  * DiffBlock: colored unified diff, auto-expanded — seeing what the agent
  * changed is the harness's whole point. Long diffs scroll inside the card.
  */
@@ -1494,25 +2394,35 @@ function DiffBlock({
 }): React.JSX.Element {
   const lines = diff.unifiedDiff.split('\n')
   return (
-    <div className="border-t border-zinc-800">
+    <div className="border-t border-zinc-800 px-3 pt-1.5 pb-3">
       <button
         onClick={() => onOpenFile(diff.path)}
         title="open this file in the viewer"
-        className="px-3 pt-2 font-mono text-xs text-sky-400 hover:underline"
+        className="pb-1.5 font-mono text-xs text-sky-400 hover:underline"
       >
         {diff.path}
       </button>
-      <pre className="max-h-80 overflow-auto px-3 py-2 font-mono text-xs leading-5">
+      {/* Inset, rounded panel on the fixed code palette (dark on dark themes,
+          light on light) — see --code-* / --diff-* in styles.css. */}
+      <pre
+        className="max-h-80 overflow-y-auto rounded-lg border px-3 py-2 font-mono text-xs leading-5 break-words whitespace-pre-wrap"
+        style={{
+          background: 'var(--code-bg)',
+          color: 'var(--code-fg)',
+          borderColor: 'var(--code-border)',
+        }}
+      >
         {lines.map((line, i) => {
-          let cls = 'text-zinc-400'
+          let style: React.CSSProperties | undefined
           if (line.startsWith('+') && !line.startsWith('+++'))
-            cls = 'bg-emerald-950/60 text-emerald-300'
+            style = { background: 'var(--diff-add-bg)', color: 'var(--diff-add-fg)' }
           else if (line.startsWith('-') && !line.startsWith('---'))
-            cls = 'bg-red-950/60 text-red-300'
-          else if (line.startsWith('@@')) cls = 'text-sky-400'
-          else if (line.startsWith('+++') || line.startsWith('---')) cls = 'text-zinc-500'
+            style = { background: 'var(--diff-del-bg)', color: 'var(--diff-del-fg)' }
+          else if (line.startsWith('@@')) style = { color: 'var(--diff-hunk-fg)' }
+          else if (line.startsWith('+++') || line.startsWith('---'))
+            style = { color: 'var(--diff-meta-fg)' }
           return (
-            <div key={i} className={cls}>
+            <div key={i} style={style}>
               {line || ' '}
             </div>
           )
@@ -1600,7 +2510,7 @@ const MD_COMPONENTS = { code: MdCode, pre: MdPre }
 
 function Markdown({ text }: { text: string }): React.JSX.Element {
   return (
-    <div className="space-y-2 text-sm [&_a]:text-sky-400 [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:border-zinc-700 [&_blockquote]:pl-3 [&_blockquote]:text-zinc-400 [&_code]:rounded [&_code]:bg-zinc-800 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_h1]:text-base [&_h1]:font-bold [&_h2]:text-sm [&_h2]:font-bold [&_h3]:font-semibold [&_li]:ml-4 [&_ol]:list-decimal [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:bg-zinc-950 [&_pre]:p-3 [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_table]:border-collapse [&_td]:border [&_td]:border-zinc-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-zinc-700 [&_th]:bg-zinc-800 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc">
+    <div className="space-y-2 text-sm [&_a]:text-sky-400 [&_a]:underline [&_blockquote]:border-l-2 [&_blockquote]:border-zinc-700 [&_blockquote]:pl-3 [&_blockquote]:text-zinc-400 [&_code]:rounded [&_code]:bg-zinc-800 [&_code]:px-1 [&_code]:py-0.5 [&_code]:font-mono [&_code]:text-[0.85em] [&_h1]:text-base [&_h1]:font-bold [&_h2]:text-sm [&_h2]:font-bold [&_h3]:font-semibold [&_li]:ml-4 [&_ol]:list-decimal [&_pre]:overflow-x-auto [&_pre]:rounded [&_pre]:border [&_pre]:border-[var(--code-border)] [&_pre]:bg-[var(--code-bg)] [&_pre]:p-3 [&_pre]:text-[var(--code-fg)] [&_pre_code]:bg-transparent [&_pre_code]:p-0 [&_table]:border-collapse [&_td]:border [&_td]:border-zinc-700 [&_td]:px-2 [&_td]:py-1 [&_th]:border [&_th]:border-zinc-700 [&_th]:bg-zinc-800 [&_th]:px-2 [&_th]:py-1 [&_ul]:list-disc">
       <ReactMarkdown remarkPlugins={[remarkGfm, remarkBreaks]} components={MD_COMPONENTS}>
         {text}
       </ReactMarkdown>

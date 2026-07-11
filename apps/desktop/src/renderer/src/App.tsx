@@ -1,6 +1,11 @@
 import { useEffect, useState } from 'react'
 import Workspace from './Workspace'
 import { Logo } from './Logo'
+import { applyStoredTheme, applyZoom, loadZoom } from './themes'
+
+// Apply before first paint — a flash of the stock theme would be ugly.
+applyStoredTheme()
+applyZoom(loadZoom())
 
 /** Last path segment, for tab labels. */
 const basename = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p

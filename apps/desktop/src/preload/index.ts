@@ -1,4 +1,4 @@
-import { contextBridge, ipcRenderer, webUtils } from 'electron'
+import { contextBridge, ipcRenderer, webFrame, webUtils } from 'electron'
 import type { AgentEvent, Command, ConfigFile, PermissionMode } from '@codehamr-ui/protocol'
 
 const api = {
@@ -6,6 +6,14 @@ const api = {
    *  window controls (mac traffic lights on the left, Windows caption buttons
    *  on the right). */
   platform: process.platform,
+  /** UI scale (accessibility) — Electron zoom scales the whole renderer. */
+  setZoom: (factor: number): Promise<void> => {
+    webFrame.setZoomFactor(factor)
+    return Promise.resolve()
+  },
+  /** Re-tint the Windows caption-button overlay to match the theme. */
+  setTitleBarOverlay: (color: string, symbolColor: string): Promise<void> =>
+    ipcRenderer.invoke('titlebar:overlay', color, symbolColor),
   /**
    * Absolute path of a dropped File. Electron removed the `File.path`
    * property in v32; webUtils is the supported replacement and must be
@@ -45,6 +53,11 @@ const api = {
   > => ipcRenderer.invoke('preview:read', root, file),
   scanModels: (url: string, key: string): Promise<string[]> =>
     ipcRenderer.invoke('models:scan', url, key),
+  gitDiffStat: (cwd: string): Promise<{ added: number; removed: number } | null> =>
+    ipcRenderer.invoke('git:diffstat', cwd),
+  /** System clipboard, for the composer's right-click menu. */
+  readClipboard: (): Promise<string> => ipcRenderer.invoke('clipboard:read'),
+  writeClipboard: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:write', text),
   getMode: (cwd: string): Promise<PermissionMode> => ipcRenderer.invoke('mode:get', cwd),
   setMode: (cwd: string, mode: PermissionMode): Promise<void> =>
     ipcRenderer.invoke('mode:set', cwd, mode),

@@ -77,18 +77,20 @@
   margin: 0.5rem 0;
 }
 .markdown a {
-  color: #38bdf8;
+  color: var(--color-sky-400);
   text-decoration: underline;
 }
 .markdown code {
-  background: #27272a;
+  background: var(--color-zinc-800);
   border-radius: 0.25rem;
   padding: 0.1rem 0.3rem;
   font-family: ui-monospace, monospace;
   font-size: 0.85em;
 }
 .markdown pre {
-  background: #09090b;
+  background: var(--code-bg);
+  color: var(--code-fg);
+  border: 1px solid var(--code-border);
   border-radius: 0.375rem;
   padding: 0.75rem;
   overflow-x: auto;
@@ -99,9 +101,9 @@
   padding: 0;
 }
 .markdown blockquote {
-  border-left: 3px solid #3f3f46;
+  border-left: 3px solid var(--color-zinc-700);
   padding-left: 0.75rem;
-  color: #a1a1aa;
+  color: var(--color-zinc-400);
   margin: 0.5rem 0;
 }
 .markdown table {
@@ -110,11 +112,119 @@
 }
 .markdown th,
 .markdown td {
-  border: 1px solid #3f3f46;
+  border: 1px solid var(--color-zinc-700);
   padding: 0.3rem 0.6rem;
 }
 .markdown th {
-  background: #27272a;
+  background: var(--color-zinc-800);
+}
+
+/* ---------------------------------------------------------------------------
+   Code surfaces have their own FIXED palette, one per mode — a dark code look
+   on dark themes, a light one on light themes — independent of the user's
+   accent/surface tint. Components read these vars (via bg-[var(--code-bg)]
+   etc.) instead of themed zinc/emerald classes, so the file preview, diffs,
+   and chat code blocks always look right. Dark values ≈ GitHub Dark; light ≈
+   GitHub Light.
+   --------------------------------------------------------------------------- */
+:root {
+  /* Dark palette = the exact colors the components used before (zinc-950
+     surfaces, emerald/red diff tints, sky selection) so dark mode is unchanged
+     from what already looked right. */
+  --code-bg: #09090b;
+  --code-fg: #c9d1d9;
+  --code-gutter-bg: #09090b;
+  --code-gutter-fg: #52525b;
+  --code-border: #27272a;
+  --code-sel-bg: rgba(14, 165, 233, 0.15);
+  --code-sel-fg: #7dd3fc;
+  --diff-add-bg: rgba(2, 44, 34, 0.6);
+  --diff-add-fg: #6ee7b7;
+  --diff-del-bg: rgba(69, 10, 10, 0.6);
+  --diff-del-fg: #fca5a5;
+  --diff-hunk-fg: #38bdf8;
+  --diff-meta-fg: #71717a;
+}
+:root[data-light] {
+  --code-bg: #ffffff;
+  --code-fg: #24292e;
+  --code-gutter-bg: #f6f8fa;
+  --code-gutter-fg: #8c959f;
+  --code-border: #d0d7de;
+  --code-sel-bg: rgba(84, 174, 255, 0.25);
+  --code-sel-fg: #0550ae;
+  --diff-add-bg: #e6ffec;
+  --diff-add-fg: #116329;
+  --diff-del-bg: #ffebe9;
+  --diff-del-fg: #82071e;
+  --diff-hunk-fg: #0550ae;
+  --diff-meta-fg: #57606a;
+}
+
+/* The highlight theme's own background never wins — the container owns it. */
+.hljs {
+  background: transparent !important;
+  color: var(--code-fg);
+}
+
+/* Light syntax palette (GitHub Light), applied only on light themes; the
+   bundled github-dark.css supplies the dark one. */
+:root[data-light] .hljs-doctag,
+:root[data-light] .hljs-keyword,
+:root[data-light] .hljs-meta .hljs-keyword,
+:root[data-light] .hljs-template-tag,
+:root[data-light] .hljs-template-variable,
+:root[data-light] .hljs-type,
+:root[data-light] .hljs-variable.language_ {
+  color: #cf222e;
+}
+:root[data-light] .hljs-title,
+:root[data-light] .hljs-title.class_,
+:root[data-light] .hljs-title.class_.inherited__,
+:root[data-light] .hljs-title.function_ {
+  color: #8250df;
+}
+:root[data-light] .hljs-attr,
+:root[data-light] .hljs-attribute,
+:root[data-light] .hljs-literal,
+:root[data-light] .hljs-meta,
+:root[data-light] .hljs-number,
+:root[data-light] .hljs-operator,
+:root[data-light] .hljs-variable,
+:root[data-light] .hljs-selector-attr,
+:root[data-light] .hljs-selector-class,
+:root[data-light] .hljs-selector-id {
+  color: #0550ae;
+}
+:root[data-light] .hljs-regexp,
+:root[data-light] .hljs-string,
+:root[data-light] .hljs-meta .hljs-string {
+  color: #0a3069;
+}
+:root[data-light] .hljs-built_in,
+:root[data-light] .hljs-symbol {
+  color: #e36209;
+}
+:root[data-light] .hljs-comment,
+:root[data-light] .hljs-code,
+:root[data-light] .hljs-formula {
+  color: #6e7781;
+}
+:root[data-light] .hljs-name,
+:root[data-light] .hljs-quote,
+:root[data-light] .hljs-selector-tag,
+:root[data-light] .hljs-selector-pseudo {
+  color: #116329;
+}
+:root[data-light] .hljs-subst {
+  color: #24292e;
+}
+:root[data-light] .hljs-section {
+  color: #0550ae;
+  font-weight: bold;
+}
+:root[data-light] .hljs-bullet {
+  color: #735c0f;
 }
 .markdown img {
   max-width: 100%;

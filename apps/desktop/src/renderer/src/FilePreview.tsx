@@ -36,6 +36,14 @@ export function FilePreview({
   onClose: () => void
   onUseInPrompt: (snippet: string) => void
 }): React.JSX.Element {
+  // Word wrap for code previews: on by default, persisted app-wide.
+  const [wrap, setWrap] = useState(() => localStorage.getItem('chwrap') !== '0')
+  const toggleWrap = (): void =>
+    setWrap((w) => {
+      localStorage.setItem('chwrap', w ? '0' : '1')
+      return !w
+    })
+
   return (
     <div className="flex min-w-0 flex-1 flex-col border-l border-zinc-800">
       <div className="flex items-center gap-2 border-b border-zinc-800 px-3 py-1.5">
@@ -45,15 +53,51 @@ export function FilePreview({
         {'note' in preview && preview.note && (
           <span className="shrink-0 text-[10px] text-amber-400">{preview.note}</span>
         )}
+        {preview.kind === 'text' && (
+          <button
+            onClick={toggleWrap}
+            title={wrap ? 'word wrap on — click to scroll long lines instead' : 'word wrap off'}
+            className={`ml-auto shrink-0 rounded p-1 hover:bg-zinc-800 ${
+              wrap ? 'text-sky-400' : 'text-zinc-500'
+            }`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="h-3.5 w-3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-4" />
+              <path d="m13 15-3 3 3 3M4 18h3" />
+            </svg>
+          </button>
+        )}
         <button
           onClick={onClose}
-          className="ml-auto shrink-0 rounded px-1.5 text-zinc-400 hover:bg-zinc-800"
+          className={`shrink-0 rounded px-1.5 text-zinc-400 hover:bg-zinc-800 ${
+            preview.kind === 'text' ? '' : 'ml-auto'
+          }`}
         >
           ✕
         </button>
       </div>
-      <div className="min-h-0 flex-1 overflow-auto">
-        <Body preview={preview} workspaceRoot={workspaceRoot} onUseInPrompt={onUseInPrompt} />
+      {/* Code sits on the fixed code palette (dark on dark themes, light on
+          light) — see --code-* in styles.css. The header/chrome follows the
+          app theme; the code body has its own look. */}
+      <div
+        className={`min-h-0 flex-1 overflow-auto ${
+          preview.kind === 'text' ? 'bg-[var(--code-bg)] text-[var(--code-fg)]' : ''
+        }`}
+      >
+        <Body
+          preview={preview}
+          workspaceRoot={workspaceRoot}
+          onUseInPrompt={onUseInPrompt}
+          wrap={wrap}
+        />
       </div>
     </div>
   )
@@ -63,10 +107,12 @@ function Body({
   preview,
   workspaceRoot,
   onUseInPrompt,
+  wrap,
 }: {
   preview: Preview
   workspaceRoot: string
   onUseInPrompt: (snippet: string) => void
+  wrap: boolean
 }): React.JSX.Element {
   switch (preview.kind) {
     case 'text':
@@ -76,6 +122,7 @@ function Body({
           path={preview.path}
           workspaceRoot={workspaceRoot}
           onUseInPrompt={onUseInPrompt}
+          wrap={wrap}
         />
       )
     case 'markdown':
@@ -152,11 +199,13 @@ function CodeView({
   path,
   workspaceRoot,
   onUseInPrompt,
+  wrap,
 }: {
   content: string
   path: string
   workspaceRoot: string
   onUseInPrompt: (snippet: string) => void
+  wrap: boolean
 }): React.JSX.Element {
   const ext = path.slice(path.lastIndexOf('.') + 1).toLowerCase()
   const lang = EXT_LANG[ext]
@@ -306,27 +355,52 @@ function CodeView({
   const hi = anchor !== null && head !== null ? Math.max(anchor, head) : null
   const selected = (n: number): boolean => lo !== null && n >= lo && n <= hi!
 
+  // Wrapped lines keep the gutter honest in the interactive path because each
+  // line is its own flex row — the number top-aligns while the code wraps
+  // beneath itself. The huge-file fallback's separate gutter column can't
+  // track wrapped heights, so wrap mode drops line numbers there.
+  const codeWrap = wrap ? 'min-w-0 whitespace-pre-wrap break-words' : 'whitespace-pre'
   const body =
     !interactive ? (
-      <div className="flex font-mono text-xs leading-5">
-        <pre className="sticky left-0 shrink-0 border-r border-zinc-800 bg-zinc-950/60 px-3 py-2 text-right text-zinc-600 select-none">
-          {rawLines.map((_, i) => i + 1).join('\n')}
-        </pre>
-        <pre className="flex-1 overflow-x-auto px-3 py-2">
+      wrap ? (
+        <pre className="px-3 py-2 font-mono text-xs leading-5 whitespace-pre-wrap break-words">
           {html ? (
-            <code className="hljs !bg-transparent" dangerouslySetInnerHTML={{ __html: html }} />
+            <code
+              className="hljs whitespace-pre-wrap break-words"
+              dangerouslySetInnerHTML={{ __html: html }}
+            />
           ) : (
-            <code className="whitespace-pre text-zinc-300">{content}</code>
+            <code className="whitespace-pre-wrap break-words">{content}</code>
           )}
         </pre>
-      </div>
+      ) : (
+        <div className="flex font-mono text-xs leading-5">
+          <pre className="sticky left-0 shrink-0 border-r border-[var(--code-border)] bg-[var(--code-gutter-bg)] px-3 py-2 text-right text-[var(--code-gutter-fg)] select-none">
+            {rawLines.map((_, i) => i + 1).join('\n')}
+          </pre>
+          <pre className="flex-1 overflow-x-auto px-3 py-2">
+            {html ? (
+              <code className="hljs" dangerouslySetInnerHTML={{ __html: html }} />
+            ) : (
+              <code className="whitespace-pre">{content}</code>
+            )}
+          </pre>
+        </div>
+      )
     ) : (
-      <div className="hljs w-max min-w-full !bg-transparent py-2 font-mono text-xs leading-5">
+      <div
+        className={`hljs ${wrap ? 'w-full' : 'w-max min-w-full'} py-2 font-mono text-xs leading-5`}
+      >
         {rawLines.map((raw, i) => {
           const n = i + 1
           const sel = selected(n)
           return (
-            <div key={i} data-ln={n} className={`flex w-full ${sel ? 'bg-sky-500/15' : ''}`}>
+            <div
+              key={i}
+              data-ln={n}
+              className="flex w-full"
+              style={sel ? { background: 'var(--code-sel-bg)' } : undefined}
+            >
               <span
                 onMouseDown={(e) => {
                   e.preventDefault() // don't start a native text selection
@@ -336,21 +410,22 @@ function CodeView({
                   setDragging(true)
                 }}
                 onMouseEnter={() => dragging && setHeadL(n)}
-                className={`sticky left-0 w-12 shrink-0 cursor-pointer border-r border-zinc-800 px-2 text-right select-none ${
+                style={
                   sel
-                    ? 'bg-sky-500/20 text-sky-300'
-                    : 'bg-zinc-950 text-zinc-600 hover:bg-zinc-800 hover:text-zinc-400'
-                }`}
+                    ? { background: 'var(--code-sel-bg)', color: 'var(--code-sel-fg)' }
+                    : { background: 'var(--code-gutter-bg)', color: 'var(--code-gutter-fg)' }
+                }
+                className="sticky left-0 w-12 shrink-0 cursor-pointer border-r border-[var(--code-border)] px-2 text-right select-none"
               >
                 {n}
               </span>
               {htmlLines ? (
                 <code
-                  className="flex-1 px-3 whitespace-pre"
+                  className={`flex-1 px-3 ${codeWrap}`}
                   dangerouslySetInnerHTML={{ __html: htmlLines[i] || ' ' }}
                 />
               ) : (
-                <code className="flex-1 px-3 whitespace-pre text-zinc-300">{raw || ' '}</code>
+                <code className={`flex-1 px-3 ${codeWrap}`}>{raw || ' '}</code>
               )}
             </div>
           )
