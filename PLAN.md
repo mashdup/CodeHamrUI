@@ -306,7 +306,7 @@ cross-build wired into extraResources, deferred until someone asks.
 ## 9. Proposed monorepo layout
 
 ```
-CodeHamrUI/
+CodeAnvil/
 ├─ apps/
 │  └─ desktop/            # Electron app
 │     ├─ src/main/        # main process (ProcessManager, ProtocolBridge, ...)

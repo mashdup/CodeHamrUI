@@ -58,4 +58,4 @@ mac:
 publish:
   provider: github
   owner: mashdup
-  repo: CodeHamrUI
+  repo: CodeAnvil
