@@ -32,6 +32,7 @@ type Item =
       args: Record<string, unknown>
       status: ToolStatus
       output?: string
+      background?: boolean // bash left a process running past the turn
       diff?: { path: string; unifiedDiff: string }
     }
   | { kind: 'notice'; id: string; text: string; tone: 'info' | 'error' }
@@ -383,6 +384,7 @@ export default function Workspace({
   const [lastInference, setLastInference] = useState<{
     promptTokens: number
     completionTokens: number
+    contextWindow?: number // effective window the agent packed against this turn
     durationMs?: number // wall-clock of the last response's generation, for tok/s
   } | null>(null)
   // Time the last assistant generation (first content token → assistant_done)
@@ -665,7 +667,12 @@ export default function Workspace({
           setItems((prev) =>
             prev.map((it) =>
               it.kind === 'tool' && it.id === event.callId
-                ? { ...it, status: event.ok ? 'done' : 'failed', output: event.output }
+                ? {
+                    ...it,
+                    status: event.ok ? 'done' : 'failed',
+                    output: event.output,
+                    background: event.background ?? false,
+                  }
                 : it,
             ),
           )
@@ -1891,13 +1898,12 @@ export default function Workspace({
                 </span>
               )}
               <div className="ml-auto flex items-center gap-2">
-                {lastInference && (
-                  <ContextMeter
-                    models={models}
-                    activeModel={activeModel}
-                    promptTokens={lastInference.promptTokens}
-                  />
-                )}
+                <ContextMeter
+                  models={models}
+                  activeModel={activeModel}
+                  promptTokens={lastInference?.promptTokens ?? 0}
+                  contextWindow={lastInference?.contextWindow ?? 0}
+                />
                 {lastInference && (
                   <div
                     className="flex items-center gap-1.5 font-mono text-[10px] text-zinc-500"
@@ -2285,22 +2291,26 @@ function VisionHint({
 /**
  * ContextMeter shows how full the active model's context window is, using the
  * prompt-token count of the last turn (what the agent actually packed and
- * sent) against the model's configured contextSize. A thin bar plus a
- * percentage; it warns-tones as the window fills so a compact/clear is an
- * obvious next move before the agent starts trimming history.
+ * sent) against the effective window. The denominator is the agent-reported
+ * contextWindow when available (covers server-managed profiles whose config
+ * omits context_size), else the profile's configured contextSize. A thin bar
+ * plus a percentage; it warns-tones as the window fills so a compact/clear is
+ * an obvious next move before the agent starts trimming history.
  */
 function ContextMeter({
   models,
   activeModel,
   promptTokens,
+  contextWindow,
 }: {
   models: ModelProfile[]
   activeModel: string
   promptTokens: number
+  contextWindow: number
 }): React.JSX.Element | null {
-  const contextSize = models.find((m) => m.name === activeModel)?.contextSize ?? 0
-  if (!contextSize || promptTokens <= 0) return null
-  const ratio = Math.min(promptTokens / contextSize, 1)
+  const denom = contextWindow || (models.find((m) => m.name === activeModel)?.contextSize ?? 0)
+  if (!denom) return null
+  const ratio = Math.min(Math.max(promptTokens, 0) / denom, 1)
   const pct = Math.round(ratio * 100)
   const tone =
     ratio >= 0.9 ? 'text-red-400' : ratio >= 0.75 ? 'text-amber-400' : 'text-zinc-500'
@@ -2309,7 +2319,9 @@ function ContextMeter({
   return (
     <div
       className={`flex items-center gap-1.5 font-mono text-[10px] ${tone}`}
-      title={`context window — ${promptTokens.toLocaleString()} of ${contextSize.toLocaleString()} tokens (${pct}%) used by the last prompt`}
+      title={`context window — ${promptTokens.toLocaleString()} of ${denom.toLocaleString()} tokens (${pct}%) ${
+        promptTokens > 0 ? 'used by the last prompt' : 'used'
+      }`}
     >
       <div className="h-1.5 w-10 overflow-hidden rounded-full bg-zinc-800">
         <div className={`h-full ${barColor}`} style={{ width: `${Math.max(pct, 2)}%` }} />
@@ -2531,6 +2543,14 @@ function ToolCard({
       >
         <span className="font-mono text-xs text-amber-400">{item.name}</span>
         <span className="truncate font-mono text-xs text-zinc-400">{summary}</span>
+        {item.background && (
+          <span
+            title="a background process is still running after the shell exited"
+            className="shrink-0 rounded bg-sky-950 px-1.5 py-0.5 text-[10px] font-medium text-sky-300"
+          >
+            background
+          </span>
+        )}
         <span
           className={`ml-auto shrink-0 text-xs ${
             item.status === 'failed' || item.status === 'denied'
@@ -2602,6 +2622,7 @@ function ToolGroupCard({
   const expanded = open || active
   const failed = tools.filter((t) => t.status === 'failed' || t.status === 'denied').length
   const names = [...new Set(tools.map((t) => t.name))].join(', ')
+  const hasBackground = tools.some((t) => t.background)
   return (
     <div className="max-w-[var(--msg-max,85%)] rounded-lg border border-zinc-800 bg-zinc-900/40 text-sm">
       <button
@@ -2613,6 +2634,14 @@ function ToolGroupCard({
           {tools.length} tool call{tools.length === 1 ? '' : 's'}
         </span>
         <span className="truncate font-mono text-xs text-zinc-500">{names}</span>
+        {hasBackground && (
+          <span
+            title="a background process is still running after the shell exited"
+            className="shrink-0 rounded bg-sky-950 px-1.5 py-0.5 text-[10px] font-medium text-sky-300"
+          >
+            background
+          </span>
+        )}
         <span
           className={`ml-auto shrink-0 text-xs ${
             active ? 'text-zinc-400' : failed > 0 ? 'text-red-400' : 'text-emerald-400'

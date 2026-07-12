@@ -162,6 +162,9 @@ export const ToolResultEvent = z.object({
   callId: z.string(),
   ok: z.boolean(),
   output: z.string(),
+  // Set when a bash command's shell exited but a backgrounded child
+  // (`cmd &`, `nohup`) is still running past the turn. Renderer badges it.
+  background: z.boolean().optional(),
   truncated: z.boolean().optional(),
 })
 
@@ -189,6 +192,10 @@ export const TurnDoneEvent = z.object({
     .object({
       promptTokens: z.number().int().nonnegative(),
       completionTokens: z.number().int().nonnegative(),
+      // Effective context window the agent packed against this turn (server
+      // header, config context_size, or fallback). Denominator for the
+      // context meter; absent on older agents.
+      contextWindow: z.number().int().nonnegative().optional(),
     })
     .optional(),
 })
@@ -278,3 +285,4 @@ export const ConfigFile = z.object({
   logging: z.boolean().optional(),
 })
 export type ConfigFile = z.infer<typeof ConfigFile>
+
