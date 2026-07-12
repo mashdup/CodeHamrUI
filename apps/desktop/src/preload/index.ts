@@ -55,6 +55,7 @@ const api = {
     ipcRenderer.invoke('models:scan', url, key),
   gitDiffStat: (cwd: string): Promise<{ added: number; removed: number } | null> =>
     ipcRenderer.invoke('git:diffstat', cwd),
+  gitBranch: (cwd: string): Promise<string | null> => ipcRenderer.invoke('git:branch', cwd),
   /** System clipboard, for the composer's right-click menu. */
   readClipboard: (): Promise<string> => ipcRenderer.invoke('clipboard:read'),
   writeClipboard: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:write', text),

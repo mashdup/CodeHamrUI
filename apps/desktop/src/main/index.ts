@@ -259,6 +259,31 @@ async function gitDiffStat(cwd: string): Promise<{ added: number; removed: numbe
   return { added, removed }
 }
 
+/**
+ * Current git branch for the workspace, for the header indicator. Returns the
+ * branch name, or the short commit SHA when HEAD is detached, or null when it's
+ * not a git repo / git is missing (the UI then hides the indicator).
+ */
+async function gitBranch(cwd: string): Promise<string | null> {
+  const run = async (args: string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileP('git', ['-C', cwd, ...args], {
+        windowsHide: true,
+        timeout: 5000,
+      })
+      return stdout.trim()
+    } catch {
+      return null
+    }
+  }
+  const branch = await run(['branch', '--show-current'])
+  if (branch === null) return null // not a repo / git missing
+  if (branch !== '') return branch
+  // Detached HEAD (empty branch name): show the short commit instead.
+  const sha = await run(['rev-parse', '--short', 'HEAD'])
+  return sha || null
+}
+
 const CONFIG_HEADER =
   '# codehamr configuration — edited via CodeAnvil\n' +
   '# key: ${MY_KEY} expands the env var at runtime, keeping secrets off disk.\n\n'
@@ -379,6 +404,7 @@ function wireIpc(): void {
   // removed lines. Returns null when it's not a git repo or git is missing, so
   // the UI can hide the badge.
   ipcMain.handle('git:diffstat', async (_evt, cwd: string) => gitDiffStat(cwd))
+  ipcMain.handle('git:branch', async (_evt, cwd: string) => gitBranch(cwd))
 
   // System clipboard access for the composer's right-click menu. Routed
   // through main because the sandboxed preload can't import the clipboard

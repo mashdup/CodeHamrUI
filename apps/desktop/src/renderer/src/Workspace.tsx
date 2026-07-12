@@ -337,6 +337,10 @@ export default function Workspace({
     setTreeReload((prev) => ({ dirs, nonce: (prev?.nonce ?? 0) + 1 }))
   }, [])
   const [viewer, setViewer] = useState<Preview | null>(null)
+  // Mirror the open file's path in a ref so the fs-change effect can re-read it
+  // without depending on `viewer` (which would resubscribe on every open).
+  const viewerPathRef = useRef<string | null>(null)
+  viewerPathRef.current = viewer?.path ?? null
   const [browserOpen, setBrowserOpen] = useState(false)
   // The preview slot stacks the file viewer and the live browser vertically.
   // panelOrder records open order: [0] on top, closing one gives the other the
@@ -386,9 +390,9 @@ export default function Workspace({
   const [items, setItems] = useState<Item[]>([])
 
   // Current git branch, shown next to the diff badge. null while unknown / not
-  // a git repo → hidden. (Populate via setCurrentBranch when wired up.)
+  // a git repo → hidden. Refreshed alongside the diff stat (a checkout changes
+  // both), see refreshGitStat.
   const [currentBranch, setCurrentBranch] = useState<string | null>(null)
-  void setCurrentBranch // reserved: branch detection not wired yet
   // Working-tree git diff stat, shown in the bar. Fetched from the main process
   // (real `git diff --numstat`) and refreshed on mount, on filesystem changes,
   // and when a turn ends. null while unknown / not a git repo → badge hidden.
@@ -398,6 +402,7 @@ export default function Workspace({
     window.clearTimeout(gitTimer.current)
     gitTimer.current = window.setTimeout(() => {
       void window.codehamr.gitDiffStat(cwd).then(setDiffStats)
+      void window.codehamr.gitBranch(cwd).then(setCurrentBranch)
     }, 250)
   }, [cwd])
   const [input, setInput] = useState('')
@@ -813,11 +818,16 @@ export default function Workspace({
     return set
   }, [items, toAbs])
 
-  const openFile = useCallback(
-    async (path: string): Promise<void> => {
-      openPanel('file') // stacks alongside the browser rather than replacing it
-      const abs = toAbs(path)
-      const r = await window.codehamr.readPreview(cwd, abs)
+  // Read an absolute path into the viewer. Shared by openFile and the live
+  // fs-refresh, so re-reading on a disk change doesn't re-stack the panel.
+  const loadViewer = useCallback(
+    async (abs: string): Promise<void> => {
+      let r: Awaited<ReturnType<typeof window.codehamr.readPreview>>
+      try {
+        r = await window.codehamr.readPreview(cwd, abs)
+      } catch {
+        return // file vanished (deleted/renamed) between the change and the read
+      }
       switch (r.kind) {
         case 'text':
         case 'markdown':
@@ -838,8 +848,31 @@ export default function Workspace({
           break
       }
     },
-    [cwd, toAbs, openPanel],
+    [cwd],
   )
+
+  const openFile = useCallback(
+    async (path: string): Promise<void> => {
+      openPanel('file') // stacks alongside the browser rather than replacing it
+      await loadViewer(toAbs(path))
+    },
+    [loadViewer, toAbs, openPanel],
+  )
+
+  // Live-refresh the open file preview when its directory changes on disk
+  // (agent writes or external edits). The watcher already debounces (300ms) and
+  // reports absolute dirs; re-read only when the open file's own dir is among
+  // them, so unrelated changes don't reload the viewer.
+  useEffect(() => {
+    return window.codehamr.onFsChanged(({ cwd: changedCwd, dirs }) => {
+      if (changedCwd !== cwd || !dirs.length) return
+      const vp = viewerPathRef.current
+      if (!vp) return
+      const n = (p: string): string => p.replace(/\\/g, '/').toLowerCase()
+      const vdir = n(vp).replace(/\/[^/]*$/, '')
+      if (dirs.some((d) => n(d) === vdir)) void loadViewer(vp)
+    })
+  }, [cwd, loadViewer])
 
   // React to agent preview requests (preview_file / preview_url tools). File
   // and browser now stack rather than replace, so opening one keeps the other.
@@ -1487,16 +1520,33 @@ export default function Workspace({
           </>
         )}
         <div className="relative ml-auto flex items-center gap-2 text-xs text-zinc-400">
+          {currentBranch && (
+            <div
+              title="current git branch"
+              className="flex max-w-[12rem] items-center gap-1 rounded border border-zinc-700 bg-zinc-900/50 px-2 py-0.5 font-mono text-sky-400"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="h-3 w-3 shrink-0"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <line x1="6" y1="3" x2="6" y2="15" />
+                <circle cx="18" cy="6" r="3" />
+                <circle cx="6" cy="18" r="3" />
+                <path d="M18 9a9 9 0 0 1-9 9" />
+              </svg>
+              <span className="truncate">{currentBranch}</span>
+            </div>
+          )}
           {diffStats && (diffStats.added > 0 || diffStats.removed > 0) && (
             <div
               title="git diff — lines changed in the working tree vs HEAD"
               className="flex items-center gap-1.5 rounded border border-zinc-700 bg-zinc-900/50 px-2 py-0.5 font-mono"
             >
-              {currentBranch && (
-                <span className="text-sky-400 shrink-0" title="current branch">
-                  {currentBranch}
-                </span>
-              )}
               {diffStats.added > 0 && (
                 <span className="text-emerald-400">+{diffStats.added.toLocaleString()}</span>
               )}
