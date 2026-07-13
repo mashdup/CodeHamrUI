@@ -3,6 +3,10 @@
 # no node_modules — plus the codehamr agent binary as an extra resource.
 appId: com.mashdup.codeanvil
 productName: Anvil
+# Linux derives executableName from the npm package name (@codehamr-ui/desktop)
+# by default, whose "@" is illegal in AppImage file paths; pin an explicit,
+# path-safe name. macOS/Windows ignore this and use productName.
+executableName: anvil
 directories:
   buildResources: build
   output: release
