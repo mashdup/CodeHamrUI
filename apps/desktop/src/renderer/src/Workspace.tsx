@@ -2562,6 +2562,14 @@ const toolColor: Record<string, string> = {
 const toolColorClass = (name: string): string => toolColor[name] ?? 'text-zinc-400'
 
 /**
+ * The file-mutation tools. Their diffs are the whole point of a coding
+ * harness, so cards for these default to showing their diff — even when
+ * grouped, where other tool cards stay collapsed.
+ */
+const isFileEditTool = (name: string): boolean =>
+  name === 'write_file' || name === 'edit_file' || name === 'multi_edit'
+
+/**
  * One-line summary shown in a tool card header. Each tool's most telling
  * argument: the command for bash, the pattern for grep/glob, the path for the
  * file tools, the url for web_fetch, an item count for todo_write. Falls back
@@ -2613,7 +2621,7 @@ function ToolCard({
   cwd?: string
   embedded?: boolean
 }): React.JSX.Element {
-  const [open, setOpen] = useState(false)
+  const [open, setOpen] = useState(isFileEditTool(item.name))
   const summary = toolSummary(item.name, item.args)
   // Undo state for a remember card: once forgotten, the fact line is stripped
   // from the out-of-repo memory file and the card reflects it.
@@ -2675,7 +2683,7 @@ function ToolCard({
         </div>
       )}
 
-      {item.diff && <DiffBlock diff={item.diff} onOpenFile={onOpenFile} />}
+      {open && item.diff && <DiffBlock diff={item.diff} onOpenFile={onOpenFile} />}
 
       {/* remember: the saved fact is short and worth seeing at a glance, so
           show it inline (not hidden behind the output toggle) with a note that
@@ -2760,6 +2768,11 @@ function ToolGroupCard({
   const failed = tools.filter((t) => t.status === 'failed' || t.status === 'denied').length
   const uniqueNames = [...new Set(tools.map((t) => t.name))]
   const hasBackground = tools.some((t) => t.background)
+  // File edits stay visible even while the group is collapsed — hiding a diff
+  // behind a fold is the wrong default for a coding harness. Each edit card
+  // still toggles its own diff off when tapped.
+  const editTools = tools.filter((t) => isFileEditTool(t.name))
+  const showEditsOnly = !expanded && editTools.length > 0
   return (
     <div className="max-w-[var(--msg-max,85%)] rounded-lg border border-zinc-800 bg-zinc-900/40 text-sm">
       <button
@@ -2797,6 +2810,13 @@ function ToolGroupCard({
       {expanded && (
         <div className="space-y-2 border-t border-zinc-800 p-2">
           {tools.map((t) => (
+            <ToolCard key={t.id} item={t} onDecide={onDecide} onOpenFile={onOpenFile} cwd={cwd} embedded />
+          ))}
+        </div>
+      )}
+      {showEditsOnly && (
+        <div className="space-y-2 border-t border-zinc-800 p-2">
+          {editTools.map((t) => (
             <ToolCard key={t.id} item={t} onDecide={onDecide} onOpenFile={onOpenFile} cwd={cwd} embedded />
           ))}
         </div>
