@@ -19,13 +19,13 @@ narrow, versioned wire protocol — the renderer has no idea the agent is Go.
   Keep every internal `codehamr` identifier as-is: the agent binary, the
   `window.codehamr` preload bridge, the `@codehamr-ui/*` package scope, and the
   `.codehamr/` config dir. Do **not** rebrand these to Anvil. (The GitHub
-  repo slug is still `mashdup/CodeAnvil`; the internal identifiers above
+  repo slug is `mashdup/Anvil`; the internal identifiers above
   did not change.)
 
 ## Repo layout
 
 ```
-CodeAnvil/                      ← this repo (github.com/mashdup/CodeAnvil, npm workspaces)
+Anvil/                          ← this repo (github.com/mashdup/Anvil, npm workspaces)
 ├── apps/desktop/               ← @codehamr-ui/desktop — the Electron app
 │   └── src/{main,preload,renderer}   ← electron-vite: 3 build targets
 ├── packages/protocol/          ← @codehamr-ui/protocol — shared TS wire types (zod)

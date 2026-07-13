@@ -90,8 +90,8 @@ Prereqs: Node 22+, Go 1.26+, Git for Windows (the agent's bash tool needs a
 POSIX shell on Windows).
 
 ```sh
-git clone --recurse-submodules git@github.com:mashdup/CodeAnvil.git
-cd CodeAnvil
+git clone --recurse-submodules git@github.com:mashdup/Anvil.git
+cd Anvil
 npm install
 npm run agent:build   # builds the fork (GOEXPERIMENT=nogreenteagc — see PLAN.md §8)
 npm run dev           # launches the app with HMR

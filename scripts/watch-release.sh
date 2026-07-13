@@ -7,7 +7,7 @@
 # then tail the log across turns.
 set -u
 
-REPO="${REPO:-mashdup/CodeAnvil}"
+REPO="${REPO:-mashdup/Anvil}"
 TAG="${1:?usage: watch-release.sh <tag> [interval_s]}"
 INTERVAL="${2:-30}"
 API="https://api.github.com/repos/$REPO/actions/runs?per_page=20"

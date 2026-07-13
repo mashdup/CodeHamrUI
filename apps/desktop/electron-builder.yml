@@ -78,4 +78,4 @@ linux:
 publish:
   provider: github
   owner: mashdup
-  repo: CodeAnvil
+  repo: Anvil
