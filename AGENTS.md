@@ -4,7 +4,7 @@ Guidance for AI coding agents working in this repo. Read this first.
 
 ## What this is
 
-**CodeAnvil** is a cross-platform (Windows + macOS) Electron desktop coding
+**Anvil** is a cross-platform (Windows + macOS) Electron desktop coding
 harness. It drives **CodeHamr**, a terminal coding agent (a forked Go tool),
 over a line-delimited JSON (NDJSON) protocol on the agent's stdin/stdout.
 
@@ -13,13 +13,13 @@ narrow, versioned wire protocol — the renderer has no idea the agent is Go.
 
 ## Naming (important)
 
-- **User-facing brand is "CodeAnvil"** (hammer + anvil). Use it in UI copy,
+- **User-facing brand is "Anvil"** (hammer + anvil). Use it in UI copy,
   release notes, and anything a user sees.
 - **The underlying agent is "CodeHamr"** — a separate project we don't rename.
   Keep every internal `codehamr` identifier as-is: the agent binary, the
   `window.codehamr` preload bridge, the `@codehamr-ui/*` package scope, and the
-  `.codehamr/` config dir. Do **not** rebrand these to CodeAnvil. (The GitHub
-  repo itself was renamed to `mashdup/CodeAnvil`; the internal identifiers above
+  `.codehamr/` config dir. Do **not** rebrand these to Anvil. (The GitHub
+  repo slug is still `mashdup/CodeAnvil`; the internal identifiers above
   did not change.)
 
 ## Repo layout

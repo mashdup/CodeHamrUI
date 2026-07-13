@@ -66,7 +66,7 @@ export default function App(): React.JSX.Element {
       >
         <span className="flex items-center gap-1.5 px-2 text-sm font-semibold tracking-tight text-zinc-200 select-none">
           <Logo className="h-5 w-5 shrink-0" />
-          CodeAnvil
+          Anvil
         </span>
         {tabs.map((dir) => (
           <div

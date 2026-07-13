@@ -2,7 +2,7 @@
 # (dependencies included) into out/, so the package ships only that bundle —
 # no node_modules — plus the codehamr agent binary as an extra resource.
 appId: com.mashdup.codeanvil
-productName: CodeAnvil
+productName: Anvil
 directories:
   buildResources: build
   output: release

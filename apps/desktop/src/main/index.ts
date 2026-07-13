@@ -320,7 +320,7 @@ async function gitBranch(cwd: string): Promise<string | null> {
 }
 
 const CONFIG_HEADER =
-  '# codehamr configuration — edited via CodeAnvil\n' +
+  '# codehamr configuration — edited via Anvil\n' +
   '# key: ${MY_KEY} expands the env var at runtime, keeping secrets off disk.\n\n'
 
 async function writeConfigFile(cwd: string, cfg: ConfigFile): Promise<void> {

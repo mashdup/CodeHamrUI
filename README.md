@@ -1,4 +1,4 @@
-# CodeAnvil
+# Anvil
 
 A desktop coding harness for [codehamr](https://codehamr.com) — drive the agent
 visually: streaming markdown replies, a live "thinking" display, gated tool
@@ -141,7 +141,7 @@ signed build.
 
 ## License
 
-MIT — see [LICENSE](LICENSE). CodeAnvil is open source; contributions welcome.
+MIT — see [LICENSE](LICENSE). Anvil is open source; contributions welcome.
 The bundled [codehamr](https://github.com/mashdup/codehamr) agent fork is also
 MIT-licensed (see its own `LICENSE`).
 

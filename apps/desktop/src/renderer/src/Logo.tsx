@@ -1,5 +1,5 @@
 /**
- * CodeAnvil wordmark glyph: the anvil + spark from the app icon, without the
+ * Anvil wordmark glyph: the anvil + spark from the app icon, without the
  * rounded-square background. The anvil uses currentColor so it tracks the
  * title-bar text — light on dark themes, dark on light ones — instead of
  * vanishing against a light bar. The amber spark stays fixed (reads on both).
