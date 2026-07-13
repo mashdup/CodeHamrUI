@@ -98,6 +98,12 @@ export default function Workspace({
   const [slashSel, setSlashSel] = useState(0)
   const [slashClosed, setSlashClosed] = useState(false)
   const [queue, setQueue] = useState<{ text: string; images: Attachment[] }[]>([])
+  // Pending ask_user selection: the agent is blocked on the user picking one of
+  // these options (or typing a custom answer) above the composer. Null when the
+  // agent isn't asking. Cleared when the user answers.
+  const [ask, setAsk] = useState<{ callId: string; prompt: string; options: string[] } | null>(
+    null,
+  )
   const [searchOpen, setSearchOpen] = useState(false)
   const [query, setQuery] = useState('')
   // Right-click context menu on user/assistant messages (copy / pin).
@@ -228,6 +234,12 @@ export default function Workspace({
           // preview hook opens the panel in a follow-up effect.
           requestAgentPreview(event.path, event.url)
           break
+        case 'ask_user':
+          // Agent is blocked on a user selection: surface the options above the
+          // composer. The tool card still renders as running; answering it
+          // sends an ask_user_response and unblocks the turn.
+          setAsk({ callId: event.callId, prompt: event.prompt, options: event.options })
+          break
         case 'reasoning_delta':
           setPhase('thinking')
           setItems((prev) => {
@@ -288,6 +300,15 @@ export default function Workspace({
             },
           ])
           break
+        case 'tool_output_delta':
+          setItems((prev) =>
+            prev.map((it) =>
+              it.kind === 'tool' && it.id === event.callId
+                ? { ...it, liveOutput: (it.liveOutput ?? '') + event.text }
+                : it,
+            ),
+          )
+          break
         case 'tool_result':
           // Round-trip continues: next LLM round follows, so back to waiting.
           setPhase('waiting')
@@ -300,6 +321,7 @@ export default function Workspace({
                     ...it,
                     status: event.ok ? 'done' : 'failed',
                     output: event.output,
+                    liveOutput: undefined,
                     background: event.background ?? false,
                   }
                 : it,
@@ -669,6 +691,15 @@ export default function Workspace({
   const sendPrompt = async (): Promise<void> => {
     const text = input.trim()
     if ((!text && attachments.length === 0) || !connected) return
+    // A pending ask_user consumes the next typed message as the user's custom
+    // answer (selection -1), rather than starting a fresh prompt. Attachments
+    // aren't part of an answer, so only plain text routes here.
+    if (ask && text && attachments.length === 0) {
+      setInput('')
+      setMdPreview(false)
+      await answerAsk(-1, text)
+      return
+    }
     // A known slash command runs instead of being sent as a prompt.
     if (attachments.length === 0 && SLASH_COMMANDS.some((c) => c.name === text.split(/\s+/)[0])) {
       setInput('')
@@ -729,6 +760,23 @@ export default function Workspace({
       callId,
       decision,
       scope,
+    })
+  }
+
+  // Answer a pending ask_user: either a chosen option (selection >= 0) or a
+  // typed custom answer (selection -1 + custom text). Either way the turn
+  // continues, so we clear the prompt and return to the tool-wait phase.
+  const answerAsk = async (selection: number, custom?: string): Promise<void> => {
+    if (!ask) return
+    const callId = ask.callId
+    setAsk(null)
+    setPhase('tool')
+    await window.codehamr.send(cwd, {
+      v: PROTOCOL_VERSION,
+      type: 'ask_user_response',
+      callId,
+      selection,
+      custom,
     })
   }
 
@@ -1415,6 +1463,26 @@ export default function Workspace({
           )}
 
           <footer className="border-t border-zinc-800 p-3">
+            {ask && (
+              <div className="mb-2 rounded-lg border border-sky-800/60 bg-sky-950/30 p-3">
+                <div className="mb-2 text-sm text-zinc-200">{ask.prompt}</div>
+                <div className="flex flex-wrap gap-2">
+                  {ask.options.map((opt, i) => (
+                    <button
+                      key={i}
+                      autoFocus={i === 0}
+                      onClick={() => void answerAsk(i)}
+                      className="rounded-md border border-sky-700 bg-sky-900/50 px-3 py-1.5 text-sm text-sky-100 hover:bg-sky-800 focus:outline-none focus-visible:ring-2 focus-visible:ring-sky-400"
+                    >
+                      {opt}
+                    </button>
+                  ))}
+                </div>
+                <div className="mt-2 text-xs text-zinc-500">
+                  Pick an option, or type your own answer below and press Enter.
+                </div>
+              </div>
+            )}
             {queue.length > 0 && (
               <div className="mb-2 flex flex-wrap gap-1.5">
                 {queue.map((q, i) => (

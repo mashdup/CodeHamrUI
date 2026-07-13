@@ -1,4 +1,4 @@
-import { useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import type { Decide, ToolItem, ToolStatus } from '../workspace/types'
 import { numberDiffLines, gut } from '../workspace/diff'
 
@@ -93,6 +93,13 @@ export function ToolCard({
 }): React.JSX.Element {
   const [open, setOpen] = useState(isFileEditTool(item.name))
   const summary = toolSummary(item.name, item.args)
+  // Live bash output: auto-follow the tail while chunks stream in, like a
+  // terminal. Only present for a running bash call; cleared on tool_result.
+  const liveRef = useRef<HTMLPreElement>(null)
+  useEffect(() => {
+    const el = liveRef.current
+    if (el) el.scrollTop = el.scrollHeight
+  }, [item.liveOutput])
   // Undo state for a remember card: once forgotten, the fact line is stripped
   // from the out-of-repo memory file and the card reflects it.
   const [forgotten, setForgotten] = useState(false)
@@ -201,6 +208,16 @@ export function ToolCard({
             </div>
           )}
         </div>
+      )}
+
+      {item.status === 'running' && item.liveOutput !== undefined && (
+        <pre
+          ref={liveRef}
+          className="max-h-64 overflow-auto border-t border-zinc-800 px-3 py-2 font-mono text-xs whitespace-pre-wrap text-zinc-400"
+        >
+          {item.liveOutput}
+          <span className="animate-pulse text-zinc-500">▍</span>
+        </pre>
       )}
 
       {open && item.output !== undefined && (

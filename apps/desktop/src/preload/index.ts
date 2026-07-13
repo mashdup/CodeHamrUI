@@ -53,6 +53,13 @@ const api = {
   > => ipcRenderer.invoke('preview:read', root, file),
   scanModels: (url: string, key: string): Promise<string[]> =>
     ipcRenderer.invoke('models:scan', url, key),
+  /** OAuth subscription linking (Claude / Codex). Phase 1: token acquisition. */
+  authStart: (provider: 'claude' | 'codex'): Promise<{ ok: boolean }> =>
+    ipcRenderer.invoke('auth:start', provider),
+  authStatus: (): Promise<{ claude: boolean; codex: boolean }> =>
+    ipcRenderer.invoke('auth:status'),
+  authLogout: (provider: 'claude' | 'codex'): Promise<void> =>
+    ipcRenderer.invoke('auth:logout', provider),
   gitDiffStat: (cwd: string): Promise<{ added: number; removed: number } | null> =>
     ipcRenderer.invoke('git:diffstat', cwd),
   gitBranch: (cwd: string): Promise<string | null> => ipcRenderer.invoke('git:branch', cwd),

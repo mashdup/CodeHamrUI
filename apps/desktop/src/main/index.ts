@@ -18,6 +18,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import electronUpdater from 'electron-updater'
 import { Command, ConfigFile } from '@codehamr-ui/protocol'
 import { AgentSession } from './agent/AgentSession'
+import { OAuthManager, type ProviderId } from './auth/OAuth'
 
 const { autoUpdater } = electronUpdater
 
@@ -171,6 +172,17 @@ interface PresetStore {
 }
 
 const presetsPath = (): string => join(app.getPath('userData'), 'presets.json')
+
+/**
+ * OAuth subscription linking (Claude / Codex). Tokens live encrypted under
+ * userData via this manager — never in the project's .codehamr/. See
+ * src/main/auth/OAuth.ts and OAUTH_PLAN.md.
+ */
+const oauth = new OAuthManager()
+
+function isProviderId(v: unknown): v is ProviderId {
+  return v === 'claude' || v === 'codex'
+}
 
 /**
  * Permission mode per workspace, kept in userData rather than the project's
@@ -661,6 +673,20 @@ function wireIpc(): void {
       title: 'Open project folder',
     })
     return result.canceled ? null : result.filePaths[0]
+  })
+
+  // -------------------------------------------------------------------------
+  // OAuth subscription linking (Phase 1: token acquisition only).
+  // -------------------------------------------------------------------------
+  ipcMain.handle('auth:start', async (_evt, provider: unknown) => {
+    if (!isProviderId(provider)) throw new Error(`unknown provider: ${String(provider)}`)
+    await oauth.start(provider)
+    return { ok: true }
+  })
+  ipcMain.handle('auth:status', async () => oauth.status())
+  ipcMain.handle('auth:logout', async (_evt, provider: unknown) => {
+    if (!isProviderId(provider)) throw new Error(`unknown provider: ${String(provider)}`)
+    await oauth.logout(provider)
   })
 
   ipcMain.handle('agent:start', async (_evt, cwd: string) => {

@@ -72,6 +72,16 @@ export const SetModeCommand = z.object({
   mode: PermissionMode,
 })
 
+/** The user's answer to an `ask_user` event: a chosen option index, or -1 with
+ *  a typed `custom` answer. There is no cancel — the user always answers. */
+export const AskUserResponseCommand = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('ask_user_response'),
+  callId: z.string(),
+  selection: z.number().int(),
+  custom: z.string().optional(),
+})
+
 export const Command = z.discriminatedUnion('type', [
   PromptCommand,
   ApproveCommand,
@@ -81,6 +91,7 @@ export const Command = z.discriminatedUnion('type', [
   ClearCommand,
   CompactCommand,
   SetModeCommand,
+  AskUserResponseCommand,
 ])
 export type Command = z.infer<typeof Command>
 
@@ -146,6 +157,18 @@ export const AssistantDoneEvent = z.object({
   type: z.literal('assistant_done'),
 })
 
+// Live, incremental bash output: emitted as chunks arrive from a running
+// command so the UI can stream stdout/stderr into the tool card before the
+// command finishes. Coalesced by the agent to avoid a per-write IPC flood.
+// UI-only — the model still receives just the final (capped) tool_result.
+export const ToolOutputDeltaEvent = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('tool_output_delta'),
+  callId: z.string(),
+  text: z.string(),
+})
+export type ToolOutputDeltaEvent = z.infer<typeof ToolOutputDeltaEvent>
+
 export const ToolCallEvent = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('tool_call'),
@@ -189,6 +212,19 @@ export const PreviewEvent = z.object({
   path: z.string().optional(),
   url: z.string().optional(),
 })
+
+/** Agent is asking the user to pick from a short list (max 5). The renderer
+ *  shows the options as buttons above the composer; the user clicks one or
+ *  types a custom answer, replied via an `ask_user_response` command carrying
+ *  the same callId. */
+export const AskUserEvent = z.object({
+  v: z.literal(PROTOCOL_VERSION),
+  type: z.literal('ask_user'),
+  callId: z.string(),
+  prompt: z.string(),
+  options: z.array(z.string()).min(1).max(5),
+})
+export type AskUserEvent = z.infer<typeof AskUserEvent>
 
 export const TurnDoneEvent = z.object({
   v: z.literal(PROTOCOL_VERSION),
@@ -235,9 +271,11 @@ export const AgentEvent = z.discriminatedUnion('type', [
   ReasoningDeltaEvent,
   AssistantDoneEvent,
   ToolCallEvent,
+  ToolOutputDeltaEvent,
   ToolResultEvent,
   FileDiffEvent,
   PreviewEvent,
+  AskUserEvent,
   TurnDoneEvent,
   ModelsEvent,
   ErrorEvent,

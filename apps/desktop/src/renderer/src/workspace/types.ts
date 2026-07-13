@@ -28,6 +28,7 @@ export type Item =
       args: Record<string, unknown>
       status: ToolStatus
       output?: string
+      liveOutput?: string // incremental bash stdout/stderr while running
       background?: boolean // bash left a process running past the turn
       diff?: { path: string; unifiedDiff: string }
     }

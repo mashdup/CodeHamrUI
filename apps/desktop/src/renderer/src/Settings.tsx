@@ -47,7 +47,14 @@ export function SettingsPanel({
   const [selectedPreset, setSelectedPreset] = useState('')
   const [presetName, setPresetName] = useState('')
   // Which panel tab is showing: the model-profile editor or project memory.
-  const [tab, setTab] = useState<'models' | 'memory'>('models')
+  const [tab, setTab] = useState<'models' | 'memory' | 'accounts'>('models')
+  // OAuth subscription linking (Accounts tab) is Phase-1-only: token
+  // acquisition works, but turns aren't yet routed through a linked
+  // subscription (Phase 2 is unstarted — see OAUTH_PLAN.md). Hidden until the
+  // backend transport lands so we don't ship a Link button that does nothing
+  // useful yet. The AccountsSection component + IPC/main wiring stay in place;
+  // flip this to true to bring the tab back.
+  const SHOW_ACCOUNTS = false
 
   const configToForm = (cfg: ConfigFile): void => {
     setActive(cfg.active)
@@ -218,6 +225,7 @@ export function SettingsPanel({
             [
               ['models', 'Model profiles'],
               ['memory', 'Project memory'],
+              ...(SHOW_ACCOUNTS ? ([['accounts', 'Accounts']] as const) : []),
             ] as const
           ).map(([id, label]) => (
             <button
@@ -236,6 +244,8 @@ export function SettingsPanel({
 
         {tab === 'memory' ? (
           <MemorySection workspace={workspace} />
+        ) : tab === 'accounts' && SHOW_ACCOUNTS ? (
+          <AccountsSection />
         ) : (
           <>
             <p className="mb-3 text-xs text-zinc-500">
@@ -406,6 +416,114 @@ export function SettingsPanel({
   )
 }
 
+
+
+/**
+ * AccountsSection: link/unlink a Claude or Codex subscription via OAuth
+ * (Phase 1 — token acquisition only; turns aren't yet routed through the
+ * subscription). Status comes from auth:status; Link runs the browser flow via
+ * auth:start; Unlink deletes stored tokens via auth:logout. Tokens live
+ * encrypted under Electron userData, never in the repo.
+ */
+const ACCOUNT_PROVIDERS = [
+  { id: 'claude', label: 'Claude', hint: 'Anthropic subscription' },
+  { id: 'codex', label: 'Codex', hint: 'ChatGPT / OpenAI subscription' },
+] as const
+
+function AccountsSection(): React.JSX.Element {
+  const [status, setStatus] = useState<{ claude: boolean; codex: boolean } | null>(null)
+  const [busy, setBusy] = useState<'claude' | 'codex' | ''>('')
+  const [error, setError] = useState('')
+
+  const refresh = (): void => {
+    void window.codehamr.authStatus().then(setStatus)
+  }
+  useEffect(refresh, [])
+
+  const link = async (id: 'claude' | 'codex'): Promise<void> => {
+    setError('')
+    setBusy(id)
+    try {
+      await window.codehamr.authStart(id)
+      refresh()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const unlink = async (id: 'claude' | 'codex'): Promise<void> => {
+    setError('')
+    try {
+      await window.codehamr.authLogout(id)
+      refresh()
+    } catch (e) {
+      setError((e as Error).message)
+    }
+  }
+
+  return (
+    <div className="flex flex-col gap-3">
+      <p className="text-xs text-zinc-500">
+        Link a subscription instead of pasting an API key. Tokens are stored
+        encrypted on this machine (never in the project). Linking captures the
+        credential now; routing agent turns through it lands in a later update.
+      </p>
+      {error && (
+        <div className="rounded border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
+          {error}
+        </div>
+      )}
+      <div className="flex flex-col gap-2">
+        {ACCOUNT_PROVIDERS.map(({ id, label, hint }) => {
+          const linked = status?.[id] ?? false
+          const pending = busy === id
+          return (
+            <div
+              key={id}
+              className="flex items-center gap-3 rounded border border-zinc-800 bg-zinc-950/50 px-3 py-2.5"
+            >
+              <div className="flex flex-col">
+                <span className="text-sm font-medium text-zinc-100">{label}</span>
+                <span className="text-[11px] text-zinc-500">{hint}</span>
+              </div>
+              <span
+                className={`ml-auto flex items-center gap-1.5 text-xs ${
+                  linked ? 'text-emerald-400' : 'text-zinc-500'
+                }`}
+              >
+                <span
+                  className={`h-1.5 w-1.5 rounded-full ${
+                    linked ? 'bg-emerald-400' : 'bg-zinc-600'
+                  }`}
+                />
+                {pending ? 'Waiting for browser…' : linked ? 'Linked' : 'Not linked'}
+              </span>
+              {linked ? (
+                <button
+                  onClick={() => void unlink(id)}
+                  disabled={pending}
+                  className="rounded border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                >
+                  Unlink
+                </button>
+              ) : (
+                <button
+                  onClick={() => void link(id)}
+                  disabled={pending}
+                  className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium hover:bg-emerald-600 disabled:opacity-40"
+                >
+                  {pending ? 'Linking…' : 'Link'}
+                </button>
+              )}
+            </div>
+          )
+        })}
+      </div>
+    </div>
+  )
+}
 
 /**
  * MemorySection: view / edit / download / load the project's persistent memory
