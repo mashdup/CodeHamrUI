@@ -8,7 +8,7 @@ file preview, slash commands, and sessions that survive restarts.
 This is an unofficial fork that brings a web-based UI over the original TUI
 agent. It runs a [lightly patched fork](https://github.com/mashdup/codehamr) of
 the agent (git submodule) that adds a headless `--json` NDJSON mode; the TUI and
-agent core are upstream's, unchanged.
+agent core are upstream's, unchanged. Open source under the [MIT license](LICENSE).
 
 ## Features
 
@@ -29,6 +29,14 @@ agent core are upstream's, unchanged.
   modal filters your messages and jumps to the one you pick.
 - **Attachments** — drag & drop or paste images (for vision models) and text
   files (inlined into the prompt); a right-click clipboard menu on the composer.
+- **Project memory** — the agent accumulates durable facts about each project
+  (build commands, where subsystems live, conventions, the tech stack) and loads
+  them into every new chat, so it keeps learning the more you work. It saves
+  facts proactively via a `remember` tool — each shown as a card with a one-click
+  **Undo** — and memory is stored **outside your repo** (in the OS user-config
+  dir, keyed per project) so it never litters the workspace or dirties git. A
+  **Project memory** tab in Settings lets you view, edit, download, or load your
+  own.
 
 **Previews & workspace**
 
@@ -130,6 +138,12 @@ Create the certificate at developer.apple.com → Certificates → *Developer ID
 Application* (needs a CSR — Keychain Access on a Mac, or openssl anywhere).
 Without the secrets, mac builds stay unsigned; macOS auto-update requires the
 signed build.
+
+## License
+
+MIT — see [LICENSE](LICENSE). CodeAnvil is open source; contributions welcome.
+The bundled [codehamr](https://github.com/mashdup/codehamr) agent fork is also
+MIT-licensed (see its own `LICENSE`).
 
 ## More
 
