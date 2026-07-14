@@ -1,7 +1,7 @@
 {
   "name": "codehamr-ui",
   "private": true,
-  "version": "0.4.2",
+  "version": "0.4.3",
   "description": "Desktop coding harness for the CodeHamr agent",
   "license": "MIT",
   "workspaces": [
