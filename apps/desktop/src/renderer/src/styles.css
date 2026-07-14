@@ -1,5 +1,4 @@
 @import 'tailwindcss';
-@plugin '@tailwindcss/typography';
 
 /* Custom title bar (App.tsx <header>): the bar itself is an OS window-drag
    region; interactive children opt back out so clicks/typing still work. */

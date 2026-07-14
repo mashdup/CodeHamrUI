@@ -6,8 +6,8 @@ interface ComposerProps {
   placeholder: string
   disabled?: boolean
   onKeyDown?: (event: React.KeyboardEvent) => void
-  onContextMenu?: (event: React.MouseEvent) => void
-  onPaste?: (event: React.ClipboardEvent) => void
+  onContextMenu?: (event: React.MouseEvent<HTMLTextAreaElement>) => void
+  onPaste?: (event: React.ClipboardEvent<HTMLTextAreaElement>) => void
   className?: string
   inputRef?: React.RefObject<HTMLTextAreaElement | null>
 }

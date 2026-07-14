@@ -149,8 +149,6 @@ export default function Workspace({
     userScrolledUpRef.current = !atBottom
     setUserScrolledUp(!atBottom)
   }, [])
-  // TipTap editor instance from the Composer, for programmatic text operations
-  // (snippet insertion, clipboard actions, focus, selection).
 
 
   const push = useCallback((item: Item) => {
@@ -689,20 +687,9 @@ export default function Workspace({
   // run immediately.
   const pickSlash = (c: SlashCmd): void => {
     if (c.arg) {
-      const cmdText = c.name + ' '
-      const ed = editorRef.current
-      if (ed) {
-        // Replace the whole document with the command prefix — the slash
-        // palette was triggered by typing "/", so we swap it for the full
-        // command name + trailing space, then focus at the end.
-        ed.chain().focus().setContent(cmdText, { emitUpdate: false }).run()
-        // Set state from the editor so sendPrompt etc. see the current text.
-        const md = (ed.storage as { markdown?: { getMarkdown: () => string } }).markdown?.getMarkdown() ?? ''
-        setInput(md)
-      } else {
-        setInput(cmdText)
-      }
+      setInput(c.name + ' ')
       setSlashClosed(true)
+      inputRef.current?.focus()
     } else {
       setInput('')
       void runSlash(c.name)
@@ -809,71 +796,62 @@ export default function Workspace({
 
   /** Insert a snippet from the preview pane into the chat input, then focus. */
   const useSnippetInPrompt = (snippet: string): void => {
-    const ed = editorRef.current
-    if (ed) {
-      ed.commands.focus()
-      ed.commands.insertContent(snippet)
-    } else {
-      setInput((prev) => (prev.trim() ? `${prev.replace(/\s*$/, '')}\n\n${snippet}\n` : `${snippet}\n`))
-    }
+    setInput((prev) => (prev.trim() ? `${prev.replace(/\s*$/, '')}\n\n${snippet}\n` : `${snippet}\n`))
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (el) {
+        el.focus()
+        el.selectionStart = el.selectionEnd = el.value.length
+      }
+    })
   }
 
-  // --- Composer right-click clipboard actions. Each works off the editor's
-  // current selection, then restores focus. --------------------------------
+  // --- Composer right-click clipboard actions. Each works off the selection
+  // captured when the menu opened, then restores focus + caret. -------------
+  const restoreCaret = (pos: number): void => {
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (el) {
+        el.focus()
+        el.selectionStart = el.selectionEnd = pos
+      }
+    })
+  }
   const copyInput = (): void => {
     if (!inputMenu) return
-    const ed = editorRef.current
-    if (ed) {
-      const { from, to } = ed.state.selection
-      if (from !== to) {
-        const sel = ed.state.doc.textBetween(from, to, '\n')
-        if (sel) void window.codehamr.writeClipboard(sel)
-      }
-    } else {
-      const sel = input.slice(inputMenu.start, inputMenu.end)
-      if (sel) void window.codehamr.writeClipboard(sel)
-    }
+    const sel = input.slice(inputMenu.start, inputMenu.end)
+    if (sel) void window.codehamr.writeClipboard(sel)
     setInputMenu(null)
   }
   const cutInput = (): void => {
     if (!inputMenu) return
-    const ed = editorRef.current
-    if (ed) {
-      const { from, to } = ed.state.selection
-      if (from !== to) {
-        const sel = ed.state.doc.textBetween(from, to, '\n')
-        if (sel) void window.codehamr.writeClipboard(sel)
-        ed.chain().focus().deleteRange({ from, to }).run()
-      }
-    } else {
-      const { start, end } = inputMenu
-      const sel = input.slice(start, end)
-      if (sel) {
-        void window.codehamr.writeClipboard(sel)
-        setInput(input.slice(0, start) + input.slice(end))
-      }
+    const { start, end } = inputMenu
+    const sel = input.slice(start, end)
+    if (sel) {
+      void window.codehamr.writeClipboard(sel)
+      setInput(input.slice(0, start) + input.slice(end))
+      restoreCaret(start)
     }
     setInputMenu(null)
   }
   const pasteInput = async (): Promise<void> => {
     if (!inputMenu) return
-    setInputMenu(null)
+    const { start, end } = inputMenu
     const text = await window.codehamr.readClipboard()
+    setInputMenu(null)
     if (!text) return
-    const ed = editorRef.current
-    if (ed) {
-      ed.chain().focus().insertContent(text).run()
-    } else {
-      const { start, end } = inputMenu
-      setInput(input.slice(0, start) + text + input.slice(end))
-    }
+    setInput(input.slice(0, start) + text + input.slice(end))
+    restoreCaret(start + text.length)
   }
   const selectAllInput = (): void => {
     setInputMenu(null)
-    const ed = editorRef.current
-    if (ed) {
-      ed.chain().focus().selectAll().run()
-    }
+    requestAnimationFrame(() => {
+      const el = inputRef.current
+      if (el) {
+        el.focus()
+        el.select()
+      }
+    })
   }
 
   const switchMode = async (next: PermissionMode): Promise<void> => {
@@ -1705,20 +1683,17 @@ export default function Workspace({
                 }}
                 onContextMenu={(e) => {
                   e.preventDefault()
+                  const el = e.currentTarget
                   // The composer is at the bottom of the window, so a menu drawn
                   // downward from the cursor overflows off-screen — clamp both
                   // axes to keep the whole menu inside the viewport.
                   const MENU_W = 160
                   const MENU_H = 140
-                  const ed = editorRef.current
-                  const sel = ed?.state.selection
-                  const from = sel?.from ?? 0
-                  const to = sel?.to ?? 0
                   setInputMenu({
                     x: Math.max(8, Math.min(e.clientX, window.innerWidth - MENU_W - 8)),
                     y: Math.max(8, Math.min(e.clientY, window.innerHeight - MENU_H - 8)),
-                    start: from,
-                    end: to,
+                    start: el.selectionStart ?? 0,
+                    end: el.selectionEnd ?? 0,
                   })
                 }}
                 onPaste={(e) => {
@@ -1757,10 +1732,6 @@ export default function Workspace({
                       return
                     }
                   }
-                  // Enter always sends the message. Shift+Enter inside a list
-                  // creates a new bullet (handled inside TipTap's
-                  // handleKeyDown, which runs before the default hard-break
-                  // keymap); Shift+Enter elsewhere is a plain line break.
                   if (e.key === 'Enter' && !e.shiftKey) {
                     e.preventDefault()
                     void sendPrompt()
@@ -1775,9 +1746,6 @@ export default function Workspace({
                 }
                 disabled={!connected}
                 inputRef={inputRef}
-                onEditorReady={(ed) => {
-                  editorRef.current = ed
-                }}
                 className="max-h-[260px] min-h-[52px]"
               />
               <button
