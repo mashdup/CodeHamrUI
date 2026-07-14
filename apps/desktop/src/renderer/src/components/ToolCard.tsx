@@ -210,7 +210,7 @@ export function ToolCard({
         </div>
       )}
 
-      {item.status === 'running' && item.liveOutput !== undefined && (
+      {open && item.status === 'running' && item.liveOutput !== undefined && (
         <pre
           ref={liveRef}
           className="max-h-64 overflow-auto border-t border-zinc-800 px-3 py-2 font-mono text-xs whitespace-pre-wrap text-zinc-400"

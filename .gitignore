@@ -9,3 +9,4 @@ out/
 release/
 # Fetched at build time by scripts/fetch-busybox.mjs (not committed).
 apps/desktop/build/shell/
+plans/
