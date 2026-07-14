@@ -36,7 +36,6 @@ interface MermaidRendererProps {
  * diagram is valid.
  */
 export function MermaidRenderer({ code }: MermaidRendererProps): React.JSX.Element {
-  const containerRef = useRef<HTMLDivElement>(null);
   const [error, setError] = useState<string | null>(null);
   const [svgContent, setSvgContent] = useState<string | null>(null);
   // Guards against an in-flight render for stale `code` overwriting the DOM
@@ -51,7 +50,6 @@ export function MermaidRenderer({ code }: MermaidRendererProps): React.JSX.Eleme
         const id = `mermaid-${Math.random().toString(36).substring(7)}`;
         const { svg } = await mermaid.render(id, code);
         if (tokenRef.current !== token) return; // superseded by a newer render
-        if (containerRef.current) containerRef.current.innerHTML = svg;
         setSvgContent(svg);
         setError(null);
       } catch (err) {
@@ -132,9 +130,14 @@ export function MermaidRenderer({ code }: MermaidRendererProps): React.JSX.Eleme
                   }}
                 >
                   <div
-                    ref={containerRef}
                     className="mermaid-svg-container flex justify-center min-h-[40px] p-4"
-                    style={error ? { display: 'none' } : undefined}
+                    // Declarative, not imperative: this div only mounts once svgContent is
+                    // truthy (see the conditional above). An effect that instead wrote into
+                    // a ref *before* setSvgContent would race the mount - the ref is still
+                    // null at that point, since this div doesn't exist yet - which was
+                    // exactly the bug that made previously-working diagrams render blank.
+                    // dangerouslySetInnerHTML paints in the same render pass as the mount.
+                    dangerouslySetInnerHTML={svgContent ? { __html: svgContent } : undefined}
                   />
                 </TransformComponent>
               </>
