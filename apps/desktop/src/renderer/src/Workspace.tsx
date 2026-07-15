@@ -12,9 +12,9 @@ import { Composer } from './components/Composer'
 
 import { ResizeHandle, RowResizeHandle, BarMenuItem } from './components/ResizeHandle'
 import { SearchModal, HistoryModal } from './components/Modals'
-import type { Attachment, ImageAttachment, FileAttachment, Item, ToolItem, Phase, SlashCmd, ChatEntry } from './workspace/types'
+import type { Attachment, InferenceStats, Item, ToolItem, SlashCmd, ChatEntry } from './workspace/types'
 import { uid, reseatIds, SLASH_COMMANDS, MAX_ATTACHMENTS } from './workspace/types'
-import { basename, clamp, normPath, isAbsPath, toolLabel, fileToAttachment, inlineFiles } from './workspace/helpers'
+import { basename, clamp, normPath, isAbsPath, fileToAttachment } from './workspace/helpers'
 import { useElementWidth } from './workspace/hooks'
 import { useGitStatus } from './workspace/useGitStatus'
 import { usePreviewPanels } from './workspace/usePreviewPanels'
@@ -28,6 +28,9 @@ import { useScrollManager } from './workspace/useScrollManager'
 import { useSessionState } from './workspace/useSessionState'
 import { useMenuDismiss, useMenuDismissDeferred } from './workspace/useMenuDismiss'
 import { useKeyboardShortcuts } from './workspace/useKeyboardShortcuts'
+import { useTranscriptPersistence } from './workspace/useTranscriptPersistence'
+import { useAgentLifecycle } from './workspace/useAgentLifecycle'
+import { useDragOverlay } from './workspace/useDragOverlay'
 import { useSlashCommands } from './workspace/useSlashCommands'
 import { useSearch } from './workspace/useSearch'
 import { TREE_MIN, TREE_MAX, PREVIEW_MIN } from './workspace/layout'
@@ -58,12 +61,7 @@ export default function Workspace({
   const reloadDirs = useCallback((dirs: string[]) => {
     setTreeReload((prev) => ({ dirs, nonce: (prev?.nonce ?? 0) + 1 }))
   }, [])
-  const [lastInference, setLastInference] = useState<{
-    promptTokens: number
-    completionTokens: number
-    contextWindow?: number // effective window the agent packed against this turn
-    durationMs?: number // wall-clock of the last response's generation, for tok/s
-  } | null>(null)
+  const [lastInference, setLastInference] = useState<InferenceStats | null>(null)
   // Time the last assistant generation (first content token → assistant_done)
   // in refs, so the readout doesn't cost a re-render per token.
   const lastGenMsRef = useRef<number | null>(null)
@@ -201,52 +199,29 @@ export default function Workspace({
   // Composer auto-grow is handled inside the Composer component (TipTap).
 
   // Boot: restore the saved transcript, then start (or adopt) the agent.
-  const loadedRef = useRef(false)
-  const bootedRef = useRef(false)
-  useEffect(() => {
-    if (bootedRef.current) return
-    bootedRef.current = true
-    void (async () => {
-      // Before the agent starts, so 'ready' can re-apply it.
-      const stored = await window.codehamr.getMode(cwd)
-      setMode(stored)
-      modeRef.current = stored
-      const saved = (await window.codehamr.readTranscript(cwd)) as Item[] | null
-      if (Array.isArray(saved)) {
-        // Reseat the id counter past restored ids so new items can't collide.
-        reseatIds(saved)
-        setItems(saved.map((it) => ('streaming' in it ? { ...it, streaming: false } : it)))
-      }
-      loadedRef.current = true
-      const { seededFrom } = await window.codehamr.startAgent(cwd)
-      if (seededFrom) {
-        push({
-          kind: 'notice',
-          id: uid(),
-          text: `new project — endpoints configured from your "${seededFrom}" preset`,
-          tone: 'info',
-        })
-      }
-    })()
-  }, [cwd, push])
-
-  // Debounced transcript autosave; gated on loadedRef so the initial empty
-  // state can never clobber a saved transcript before the restore completes.
-  useEffect(() => {
-    if (!loadedRef.current) return
-    const t = setTimeout(() => void window.codehamr.writeTranscript(cwd, items), 500)
-    return () => clearTimeout(t)
-  }, [items, cwd])
+  const loadedRef = useTranscriptPersistence({
+    cwd,
+    items,
+    setItems,
+    setMode,
+    modeRef,
+    reseatIds,
+    push,
+    uid,
+  })
 
   // Token/context readouts describe the *active* session's last turn, so they
   // must be dropped when the session changes — otherwise the stale count and
   // context-window bar carry over into a freshly opened or switched-to chat.
-  const resetSessionStats = (): void => {
+  // Memoized: it's a dep of onEvent, whose identity gates the IPC
+  // subscriptions in useAgentLifecycle — an unstable reference here would
+  // resubscribe them on every render.
+  const resetSessionStats = useCallback((): void => {
     setLastInference(null)
     setStreamMeter(null)
     genStartRef.current = null
     lastGenMsRef.current = null
-  }
+  }, [setStreamMeter, genStartRef, lastGenMsRef])
 
   // ---------------------------------------------------------------------
   // Chat history: New chat archives the current conversation; History
@@ -303,34 +278,14 @@ export default function Workspace({
   })
 
   // Subscribe to this workspace's slice of the event streams.
-  useEffect(() => {
-    const offEvent = window.codehamr.onEvent((p) => {
-      if (p.cwd === cwd) onEvent(p.event)
-    })
-    // Agent stderr / non-protocol stdout: a Go panic or startup failure lands
-    // here. Surfacing it is the difference between a debuggable crash and a
-    // silent "agent exited".
-    const offNoise = window.codehamr.onNoise((p) => {
-      if (p.cwd === cwd) push({ kind: 'notice', id: uid(), text: p.line, tone: 'info' })
-    })
-    const offExit = window.codehamr.onExit(({ cwd: eCwd, code, signal }) => {
-      if (eCwd !== cwd) return
-      setConnected(false)
-      endTurn()
-      const why = code !== null ? `code ${code}` : signal ? `signal ${signal}` : 'reason unknown'
-      push({
-        kind: 'notice',
-        id: uid(),
-        text: `agent exited (${why}) — see the lines above for its last words`,
-        tone: 'error',
-      })
-    })
-    return () => {
-      offEvent()
-      offNoise()
-      offExit()
-    }
-  }, [cwd, onEvent, endTurn, push])
+  useAgentLifecycle({
+    cwd,
+    onEvent,
+    push,
+    uid,
+    setConnected,
+    endTurn,
+  })
 
 
 
@@ -499,33 +454,8 @@ export default function Workspace({
   // button's own click fires first (bubbles later), so this runs after it.
   useMenuDismissDeferred(barMenuOpen, setBarMenuOpen)
 
-  // Drop-overlay safety net. The depth-counted enter/leave handlers on the
-  // container clear the overlay in the normal case, but a drag can end without
-  // any leave/drop landing on us: cancelled with Escape, dropped outside the
-  // window, or swallowed by the out-of-process <webview>. These window-level
-  // listeners guarantee the "drop files" banner never gets stranded on screen.
-  useEffect(() => {
-    if (!dragOver) return
-    const clear = (): void => {
-      dragDepth.current = 0
-      setDragOver(false)
-    }
-    // A dragleave whose relatedTarget is null means the pointer left the
-    // window entirely; a global drop/dragend covers drops that never reach us.
-    const onLeave = (e: DragEvent): void => {
-      if (!e.relatedTarget) clear()
-    }
-    window.addEventListener('drop', clear)
-    window.addEventListener('dragend', clear)
-    window.addEventListener('dragleave', onLeave)
-    window.addEventListener('blur', clear)
-    return () => {
-      window.removeEventListener('drop', clear)
-      window.removeEventListener('dragend', clear)
-      window.removeEventListener('dragleave', onLeave)
-      window.removeEventListener('blur', clear)
-    }
-  }, [dragOver])
+  // Drop-overlay safety net.
+  useDragOverlay({ dragOver, setDragOver, dragDepth })
 
   // Keyboard shortcuts, active tab only.
   useKeyboardShortcuts({

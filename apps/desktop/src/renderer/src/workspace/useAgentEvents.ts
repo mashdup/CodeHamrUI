@@ -1,7 +1,7 @@
 import { useCallback } from 'react'
-import type { AgentEvent } from '@codehamr-ui/protocol'
+import type { AgentEvent, ModelProfile, PermissionMode } from '@codehamr-ui/protocol'
 import { PROTOCOL_VERSION } from '@codehamr-ui/protocol'
-import type { Item, Phase } from './types'
+import type { InferenceStats, Item, Phase } from './types'
 import { uid } from './types'
 import { toolLabel, isAbsPath } from './helpers'
 
@@ -37,12 +37,12 @@ export function useAgentEvents({
   lastGenMsRef,
 }: {
   cwd: string
-  modeRef: React.MutableRefObject<string>
+  modeRef: React.MutableRefObject<PermissionMode>
   showToast: (msg: string) => void
   setConnected: (v: boolean) => void
   setActiveModel: (v: string) => void
-  setModels: (v: any[]) => void
-  setMode: (v: any) => void
+  setModels: (v: ModelProfile[]) => void
+  setMode: (v: PermissionMode) => void
   resetSessionStats: () => void
   endTurn: () => void
   push: (item: Item) => void
@@ -58,7 +58,7 @@ export function useAgentEvents({
   setStep: React.Dispatch<React.SetStateAction<number>>
   setStreamMeter: (v: { tokens: number; tokPerSec: number } | null) => void
   setRunningTool: (v: string) => void
-  setLastInference: (v: any) => void
+  setLastInference: (v: InferenceStats | null) => void
   lastGenMsRef: React.MutableRefObject<number | null>
 }): (event: AgentEvent) => void {
   return useCallback(
@@ -72,7 +72,7 @@ export function useAgentEvents({
             void window.codehamr.send(cwd, {
               v: PROTOCOL_VERSION,
               type: 'set_mode',
-              mode: modeRef.current as 'ask' | 'auto',
+              mode: modeRef.current,
             })
           }
           if (event.historyLen) {
@@ -96,7 +96,7 @@ export function useAgentEvents({
           })
           break
         case 'mode':
-          setMode(event.mode as 'ask' | 'auto') // the agent is the source of truth
+          setMode(event.mode) // the agent is the source of truth
           break
         case 'file_diff': {
           // Reload just the edited file's directory (the watcher also catches

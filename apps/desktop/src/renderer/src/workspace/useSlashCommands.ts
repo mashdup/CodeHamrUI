@@ -1,6 +1,6 @@
 import { useEffect, type RefObject } from 'react'
 import { PROTOCOL_VERSION } from '@codehamr-ui/protocol'
-import type { Attachment, SlashCmd, Phase } from './types'
+import type { Attachment, Item, SlashCmd, Phase } from './types'
 import { uid, SLASH_COMMANDS } from './types'
 
 interface UseSlashCommandsParams {
@@ -24,7 +24,7 @@ interface UseSlashCommandsParams {
   dispatchPrompt: (text: string, attachments: Attachment[]) => Promise<void>
   models: Array<{ name: string; llm: string; url: string; contextSize: number }>
   activeModel: string
-  push: (item: any) => void
+  push: (item: Item) => void
   endTurn: () => void
   setPhase: (phase: Phase) => void
   setTurnStart: (time: number) => void

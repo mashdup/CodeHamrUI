@@ -1,10 +1,11 @@
 import { useEffect } from 'react'
+import type { Preview } from '../FilePreview'
 
 interface UseKeyboardShortcutsParams {
   visible: boolean
   searchOpen: boolean
   historyOpen: boolean
-  viewer: any
+  viewer: Preview | null
   setSearchOpen: (open: boolean) => void
   setQuery: (query: string) => void
   setHistoryOpen: (open: boolean) => void

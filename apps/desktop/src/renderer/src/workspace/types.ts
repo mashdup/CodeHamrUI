@@ -49,6 +49,14 @@ export type Phase = 'idle' | 'waiting' | 'thinking' | 'streaming' | 'tool'
 /** Which preview panels are open, in stacking order (top → bottom). */
 export type PreviewPanel = 'file' | 'browser'
 
+/** Token usage of the last completed turn, for the status-bar readout. */
+export type InferenceStats = {
+  promptTokens: number
+  completionTokens: number
+  contextWindow?: number // effective window the agent packed against this turn
+  durationMs?: number // wall-clock of the last response's generation, for tok/s
+}
+
 // Slash commands available from the composer. `arg` (when set) means the
 // command takes an argument, so completing it inserts a trailing space instead
 // of running immediately. Handlers live in runSlash inside the component.

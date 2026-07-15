@@ -1,5 +1,5 @@
-import { useEffect } from 'react'
 import type { Item } from './types'
+import { useMenuDismiss } from './useMenuDismiss'
 
 interface UseMessageMenuParams {
   msgMenu: { x: number; y: number; id: string } | null
@@ -37,19 +37,7 @@ export function useMessageMenu({
   }
 
   // Any click or Escape dismisses the message context menu.
-  useEffect(() => {
-    if (!msgMenu) return
-    const close = (): void => setMsgMenu(null)
-    const onKey = (e: KeyboardEvent): void => {
-      if (e.key === 'Escape') close()
-    }
-    window.addEventListener('click', close)
-    window.addEventListener('keydown', onKey)
-    return () => {
-      window.removeEventListener('click', close)
-      window.removeEventListener('keydown', onKey)
-    }
-  }, [msgMenu])
+  useMenuDismiss(msgMenu, setMsgMenu)
 
   return { togglePin, copyMessage }
 }
