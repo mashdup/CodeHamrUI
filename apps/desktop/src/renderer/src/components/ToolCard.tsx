@@ -27,6 +27,7 @@ const toolColor: Record<string, string> = {
   multi_edit: 'text-emerald-400',
   todo_write: 'text-violet-400',
   remember: 'text-fuchsia-400',
+  askUser: 'text-indigo-400',
 }
 
 const toolColorClass = (name: string): string => toolColor[name] ?? 'text-zinc-400'
@@ -38,6 +39,27 @@ const toolColorClass = (name: string): string => toolColor[name] ?? 'text-zinc-4
  */
 const isFileEditTool = (name: string): boolean =>
   name === 'write_file' || name === 'edit_file' || name === 'multi_edit'
+
+/**
+ * Parse a unified diff and return the count of added and removed lines.
+ * Excludes file headers (---/+++/diff/index) and hunk headers.
+ */
+function parseDiffStat(unified: string): { added: number; removed: number } {
+  let added = 0
+  let removed = 0
+  for (const line of unified.split('\n')) {
+    if (
+      line.startsWith('+++') ||
+      line.startsWith('---') ||
+      line.startsWith('diff ') ||
+      line.startsWith('index ')
+    )
+      continue
+    if (line.startsWith('+')) added++
+    else if (line.startsWith('-')) removed++
+  }
+  return { added, removed }
+}
 
 /**
  * One-line summary shown in a tool card header. Each tool's most telling
@@ -69,6 +91,8 @@ function toolSummary(name: string, args: Record<string, unknown>): string {
     }
     case 'remember':
       return String(args.fact ?? '')
+    case 'askUser':
+      return String(args.prompt ?? '')
     case 'read_file':
     case 'write_file':
     case 'edit_file':
@@ -93,6 +117,7 @@ export const ToolCard = memo(function ToolCard({
 }): React.JSX.Element {
   const [open, setOpen] = useState(isFileEditTool(item.name))
   const summary = toolSummary(item.name, item.args)
+  const diffStat = item.diff ? parseDiffStat(item.diff.unifiedDiff) : null
   // Live bash output: auto-follow the tail while chunks stream in, like a
   // terminal. Only present for a running bash call; cleared on tool_result.
   const liveRef = useRef<HTMLPreElement>(null)
@@ -121,6 +146,16 @@ export const ToolCard = memo(function ToolCard({
             className="shrink-0 rounded bg-sky-950 px-1.5 py-0.5 text-[10px] font-medium text-sky-300"
           >
             background
+          </span>
+        )}
+        {diffStat && (diffStat.added > 0 || diffStat.removed > 0) && (
+          <span
+            title={`${diffStat.added} insertion${diffStat.added === 1 ? '' : 's'}, ${diffStat.removed} deletion${diffStat.removed === 1 ? '' : 's'}`}
+            className="shrink-0 font-mono text-[10px]"
+          >
+            {diffStat.added > 0 && <span className="text-emerald-400">+{diffStat.added}</span>}
+            {diffStat.added > 0 && diffStat.removed > 0 && <span className="text-zinc-600"> </span>}
+            {diffStat.removed > 0 && <span className="text-red-400">−{diffStat.removed}</span>}
           </span>
         )}
         <span
@@ -157,6 +192,43 @@ export const ToolCard = memo(function ToolCard({
           >
             Deny
           </button>
+        </div>
+      )}
+
+      {/* askUser: show the prompt and options inline, with the selected answer when done */}
+      {item.name === 'askUser' && typeof item.args.prompt === 'string' && (
+        <div className="border-t border-zinc-800 px-3 py-2">
+          <p className="mb-2 text-sm text-zinc-200">{String(item.args.prompt)}</p>
+          {Array.isArray(item.args.options) && item.args.options.length > 0 && (
+            <div className="mb-2 flex flex-wrap gap-1.5">
+              {item.args.options.map((opt, i) => {
+                const optStr = String(opt)
+                const isSelected =
+                  item.status === 'done' &&
+                  item.output &&
+                  item.output.includes(`selected: ${optStr}`)
+                return (
+                  <span
+                    key={i}
+                    className={`rounded-md border px-2.5 py-1 text-xs ${
+                      isSelected
+                        ? 'border-indigo-600 bg-indigo-900/50 text-indigo-100'
+                        : 'border-zinc-700 bg-zinc-800/50 text-zinc-300'
+                    }`}
+                  >
+                    {isSelected && <span className="mr-1">✓</span>}
+                    {optStr}
+                  </span>
+                )
+              })}
+            </div>
+          )}
+          {item.status === 'done' && item.output && (
+            <div className="flex items-start gap-2 border-t border-zinc-800/50 pt-2">
+              <span className="shrink-0 text-indigo-400">↳</span>
+              <p className="text-xs text-zinc-400">{item.output}</p>
+            </div>
+          )}
         </div>
       )}
 
