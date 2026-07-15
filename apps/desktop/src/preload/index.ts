@@ -97,6 +97,10 @@ const api = {
   getMode: (cwd: string): Promise<PermissionMode> => ipcRenderer.invoke('mode:get', cwd),
   setMode: (cwd: string, mode: PermissionMode): Promise<void> =>
     ipcRenderer.invoke('mode:set', cwd, mode),
+  loadAppearance: (): Promise<{ theme?: { name: string; custom?: { bg: string; accent: string } }; zoom?: number }> =>
+    ipcRenderer.invoke('appearance:load'),
+  saveAppearance: (patch: { theme?: { name: string; custom?: { bg: string; accent: string } }; zoom?: number }): Promise<void> =>
+    ipcRenderer.invoke('appearance:save', patch),
   listPresets: (): Promise<{ defaultPreset: string | null; presets: Record<string, ConfigFile> }> =>
     ipcRenderer.invoke('presets:list'),
   savePreset: (name: string, cfg: ConfigFile, setDefault: boolean): Promise<void> =>

@@ -206,6 +206,29 @@ function isProviderId(v: unknown): v is ProviderId {
 const modesPath = (): string => join(app.getPath('userData'), 'modes.json')
 
 /**
+ * Appearance settings (theme, zoom) persisted to userData so they survive
+ * dev restarts where localStorage may be cleared. Loaded synchronously at
+ * startup to apply before first paint.
+ */
+interface AppearanceStore {
+  theme?: { name: string; custom?: { bg: string; accent: string } }
+  zoom?: number
+}
+const appearancePath = (): string => join(app.getPath('userData'), 'appearance.json')
+
+function readAppearance(): AppearanceStore {
+  try {
+    return JSON.parse(readFileSync(appearancePath(), 'utf8')) as AppearanceStore
+  } catch {
+    return {}
+  }
+}
+
+function writeAppearance(store: AppearanceStore): void {
+  writeFileSync(appearancePath(), JSON.stringify(store, null, 2), 'utf8')
+}
+
+/**
  * Project memory lives OUT of the repo, in the same persistent per-project
  * store the agent's Go core uses (config.MemoryPath): the OS user-config dir
  * (app.getPath('appData') === Go's os.UserConfigDir on all three platforms),
@@ -1215,6 +1238,15 @@ function wireIpc(): void {
     const modes = readModes()
     modes[cwd] = mode
     writeFileSync(modesPath(), JSON.stringify(modes, null, 2), 'utf8')
+  })
+
+  // Appearance (theme, zoom) persists to userData so it survives dev restarts.
+  ipcMain.handle('appearance:load', async () => readAppearance())
+
+  ipcMain.handle('appearance:save', async (_evt, patch: AppearanceStore) => {
+    const current = readAppearance()
+    const merged = { ...current, ...patch }
+    writeAppearance(merged)
   })
 
   // Scan an OpenAI-compatible endpoint's model list (GET /v1/models). Runs in

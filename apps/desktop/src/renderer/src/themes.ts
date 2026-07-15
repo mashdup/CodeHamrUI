@@ -132,11 +132,16 @@ const themedVars = (): string[] => [
 
 const STORAGE_KEY = 'chtheme'
 
-export function applyTheme(choice: ThemeChoice): void {
+export function applyTheme(choice: ThemeChoice, persist = true): void {
   const root = document.documentElement
   for (const v of themedVars()) root.style.removeProperty(v)
   delete root.dataset.light
   localStorage.setItem(STORAGE_KEY, JSON.stringify(choice))
+  // Persist to main process so it survives dev restarts, but only on explicit
+  // user picks — not during startup when we're just restoring the cached value.
+  if (persist) {
+    void window.codehamr.saveAppearance({ theme: choice })
+  }
 
   const seeds =
     choice.name === 'custom' ? choice.custom : SCHEMES.find((s) => s.name === choice.name)
@@ -193,7 +198,7 @@ export function loadThemeChoice(): ThemeChoice {
 }
 
 export function applyStoredTheme(): void {
-  applyTheme(loadThemeChoice())
+  applyTheme(loadThemeChoice(), false) // don't persist during startup
 }
 
 // ---------------------------------------------------------------------------
@@ -208,8 +213,13 @@ export function loadZoom(): number {
   return Number.isFinite(z) && z >= 0.7 && z <= 1.6 ? z : 1
 }
 
-export function applyZoom(factor: number): void {
+export function applyZoom(factor: number, persist = true): void {
   const f = Math.min(1.6, Math.max(0.7, factor))
   localStorage.setItem(ZOOM_KEY, String(f))
   void window.codehamr.setZoom(f)
+  // Persist to main process so it survives dev restarts, but only on explicit
+  // user picks — not during startup when we're just restoring the cached value.
+  if (persist) {
+    void window.codehamr.saveAppearance({ zoom: f })
+  }
 }

@@ -1,11 +1,13 @@
 import { useEffect, useState } from 'react'
 import Workspace from './Workspace'
 import { Logo } from './Logo'
-import { applyStoredTheme, applyZoom, loadZoom } from './themes'
+import { applyStoredTheme, applyZoom, loadZoom, applyTheme, loadThemeChoice } from './themes'
 
 // Apply before first paint — a flash of the stock theme would be ugly.
+// This loads from localStorage (fast). If localStorage is empty (dev restart),
+// we'll load from the main process after mount.
 applyStoredTheme()
-applyZoom(loadZoom())
+applyZoom(loadZoom(), false) // don't persist during startup
 
 /** Last path segment, for tab labels. */
 const basename = (p: string): string => p.split(/[\\/]/).filter(Boolean).pop() ?? p
@@ -19,6 +21,20 @@ export default function App(): React.JSX.Element {
   const [tabs, setTabs] = useState<string[]>([])
   const [active, setActive] = useState<string | null>(null)
   const [updateVersion, setUpdateVersion] = useState<string | null>(null)
+
+  useEffect(() => {
+    // Load appearance from main process on startup. This is the durable
+    // source of truth; localStorage is just a fast cache for HMR.
+    void window.codehamr.loadAppearance().then((saved) => {
+      if (saved?.theme) {
+        console.log('[App] Applying theme:', saved.theme.name, saved.theme.custom)
+        applyTheme(saved.theme as any, false)
+      }
+      if (saved?.zoom) {
+        applyZoom(saved.zoom, false)
+      }
+    })
+  }, [])
 
   useEffect(() => window.codehamr.onUpdateReady(setUpdateVersion), [])
 
