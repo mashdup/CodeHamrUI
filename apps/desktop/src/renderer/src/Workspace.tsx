@@ -25,6 +25,7 @@ import { useToast } from './workspace/useToast'
 import { useInputMenu } from './workspace/useInputMenu'
 import { useMessageMenu } from './workspace/useMessageMenu'
 import { useScrollManager } from './workspace/useScrollManager'
+import { useSessionState } from './workspace/useSessionState'
 import { useSlashCommands } from './workspace/useSlashCommands'
 import { useSearch } from './workspace/useSearch'
 import { TREE_MIN, TREE_MAX, PREVIEW_MIN } from './workspace/layout'
@@ -128,18 +129,26 @@ export default function Workspace({
   const [barRef, barW] = useElementWidth<HTMLDivElement>()
   const compactBar = barW > 0 && barW < 520
   const [barMenuOpen, setBarMenuOpen] = useState(false)
-  const [busy, setBusy] = useState(false)
-  const [phase, setPhase] = useState<Phase>('idle')
-  const [runningTool, setRunningTool] = useState<string>('')
-  const [turnStart, setTurnStart] = useState<number | null>(null)
-  const [elapsed, setElapsed] = useState(0)
-  // Richer progress: agentic round number, live generation meter, and per-round
-  // prefill timing (time-to-first-token). Refs for the hot path (per token).
-  const [step, setStep] = useState(0)
-  const [streamMeter, setStreamMeter] = useState<{ tokens: number; tokPerSec: number } | null>(null)
-  const genCharsRef = useRef(0) // chars streamed in the current generation (≈ tokens×4)
-  const prefillMsRef = useRef<number | null>(null) // time-to-first-token of the current round
-  const roundStartRef = useRef<number | null>(null) // when the current round's wait began
+  const {
+    busy,
+    setBusy,
+    phase,
+    setPhase,
+    runningTool,
+    setRunningTool,
+    turnStart,
+    setTurnStart,
+    elapsed,
+    setElapsed,
+    step,
+    setStep,
+    streamMeter,
+    setStreamMeter,
+    genCharsRef,
+    prefillMsRef,
+    roundStartRef,
+    endTurn,
+  } = useSessionState(setItems)
   const {
     scrollRef,
     userScrolledUp,
@@ -157,26 +166,6 @@ export default function Workspace({
   // the workspace's chosen mode. A ref keeps onEvent free of a mode dep.
   const modeRef = useRef<PermissionMode>('ask')
   modeRef.current = mode
-
-  const endTurn = useCallback(() => {
-    setBusy(false)
-    setPhase('idle')
-    setRunningTool('')
-    setTurnStart(null)
-    setStep(0)
-    setStreamMeter(null)
-    genCharsRef.current = 0
-    prefillMsRef.current = null
-    roundStartRef.current = null
-    // Freeze any still-streaming bubbles so the caret stops blinking.
-    setItems((prev) =>
-      prev.map((it) =>
-        (it.kind === 'assistant' || it.kind === 'reasoning') && it.streaming
-          ? { ...it, streaming: false }
-          : it,
-      ),
-    )
-  }, [])
 
   const { toast, showToast } = useToast()
 
