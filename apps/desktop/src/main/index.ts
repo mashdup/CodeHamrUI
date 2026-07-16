@@ -555,6 +555,123 @@ async function gitBranch(cwd: string): Promise<string | null> {
   return sha || null
 }
 
+/**
+ * Project summary for the empty-chat screen: a one-shot bundle of the git
+ * facts worth surfacing (branch, last commit, tracked file count, working-tree
+ * change counts, diffstat). Everything is best-effort and null when the repo or
+ * git isn't available, so the UI can degrade gracefully (non-git folders just
+ * show fewer cards).
+ */
+export interface ProjectStats {
+  isGitRepo: boolean
+  branch: string | null
+  headSha: string | null
+  headSubject: string | null
+  headAuthorName: string | null
+  headAuthorDate: string | null // ISO 8601
+  headRelative: string | null // "2 days ago"
+  trackedFiles: number | null
+  /** Working-tree change counts (modified, staged-new, untracked). */
+  modified: number
+  added: number
+  untracked: number
+  diffAdded: number
+  diffRemoved: number
+}
+
+async function gitHeadInfo(
+  cwd: string,
+): Promise<{
+  sha: string | null
+  subject: string | null
+  authorName: string | null
+  authorDate: string | null
+  relative: string | null
+}> {
+  const run = async (args: string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileP('git', ['-C', cwd, ...args], {
+        windowsHide: true,
+        timeout: 5000,
+      })
+      return stdout
+    } catch {
+      return null
+    }
+  }
+  const sha = (await run(['rev-parse', '--short', 'HEAD']))?.trim() ?? null
+  if (!sha) return { sha: null, subject: null, authorName: null, authorDate: null, relative: null }
+  // %s subject, %an author name, %aI ISO date, %cr relative ("2 days ago").
+  const fmt = await run(['log', '-1', '--format=%s%x1f%an%x1f%aI%x1f%cr', 'HEAD'])
+  if (fmt === null) return { sha, subject: null, authorName: null, authorDate: null, relative: null }
+  const [subject, authorName, authorDate, relative] = fmt.split('\x1f')
+  return {
+    sha,
+    subject: subject?.trim() || null,
+    authorName: authorName?.trim() || null,
+    authorDate: authorDate?.trim() || null,
+    relative: relative?.trim() || null,
+  }
+}
+
+async function projectStats(cwd: string): Promise<ProjectStats> {
+  const run = async (args: string[]): Promise<string | null> => {
+    try {
+      const { stdout } = await execFileP('git', ['-C', cwd, ...args], {
+        windowsHide: true,
+        timeout: 5000,
+        maxBuffer: 16 * 1024 * 1024,
+      })
+      return stdout
+    } catch {
+      return null
+    }
+  }
+  // A folder is a git repo if `git rev-parse --git-dir` resolves inside cwd.
+  // We run this first so non-git folders short-circuit before the heavier
+  // queries below (all of which would just return null anyway).
+  const gitDir = await run(['rev-parse', '--git-dir'])
+  const isGitRepo = gitDir !== null && gitDir.trim() !== ''
+  if (!isGitRepo) {
+    return {
+      isGitRepo: false,
+      branch: null,
+      headSha: null,
+      headSubject: null,
+      headAuthorName: null,
+      headAuthorDate: null,
+      headRelative: null,
+      trackedFiles: null,
+      modified: 0,
+      added: 0,
+      untracked: 0,
+      diffAdded: 0,
+      diffRemoved: 0,
+    }
+  }
+  const branch = (await run(['branch', '--show-current']))?.trim() ?? null
+  const trackedOut = await run(['ls-files'])
+  const trackedFiles = trackedOut === null ? null : trackedOut.split('\n').filter(Boolean).length
+  const head = await gitHeadInfo(cwd)
+  const diff = await gitDiffStat(cwd)
+  const status = await gitStatus(cwd)
+  return {
+    isGitRepo: true,
+    branch: branch && branch !== '' ? branch : head.sha, // detached → show sha
+    headSha: head.sha,
+    headSubject: head.subject,
+    headAuthorName: head.authorName,
+    headAuthorDate: head.authorDate,
+    headRelative: head.relative,
+    trackedFiles,
+    modified: status?.modified.length ?? 0,
+    added: status?.added.length ?? 0,
+    untracked: status?.untracked.length ?? 0,
+    diffAdded: diff?.added ?? 0,
+    diffRemoved: diff?.removed ?? 0,
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Session checkpoints: git stash-based snapshots before each agent turn.
 // Stashes are separate from commit history, keeping `git log` clean.
@@ -589,8 +706,20 @@ async function gitCreateCheckpoint(
 
   const timestamp = Date.now()
   const message = `checkpoint:${sessionId}:${timestamp}`
-  const ref = await run(['stash', 'push', '-m', message, '--include-untracked'])
-  if (ref === null) return null
+  // `git stash push` resets the working tree to HEAD as a side effect —
+  // exactly the "my files vanished" bug this is meant to protect against.
+  // Instead we stage everything (index-only, doesn't touch files on disk),
+  // snapshot that state into a stash commit with `stash create`/`store`
+  // (neither touches the index or working tree), then `git reset` to
+  // unstage again — `reset` without --hard only rewinds the index, so the
+  // working tree is left completely untouched throughout.
+  const staged = await run(['add', '-A'])
+  if (staged === null) return null
+  const commit = await run(['stash', 'create', message])
+  await run(['reset'])
+  if (commit === null || commit === '') return null // nothing to snapshot
+  const stored = await run(['stash', 'store', '-m', message, commit])
+  if (stored === null) return null
   return 'stash@{0}'
 }
 
@@ -621,9 +750,13 @@ async function gitListCheckpoints(
 
     const ref = parts[0]
     const subject = parts[1]
-    if (!subject.startsWith(prefix)) continue
+    // git prefixes the message we passed with "On <branch>: " (or
+    // "WIP on <branch>: "), so the checkpoint prefix appears mid-string —
+    // startsWith never matched, silently hiding every checkpoint.
+    const prefixIdx = subject.indexOf(prefix)
+    if (prefixIdx === -1) continue
 
-    const timestamp = Number(subject.slice(prefix.length))
+    const timestamp = Number(subject.slice(prefixIdx + prefix.length))
     if (isNaN(timestamp)) continue
 
     const numstat = await run(['stash', 'show', '--numstat', ref])
@@ -805,6 +938,27 @@ function wireIpc(): void {
   )
   ipcMain.handle('git:status', async (_evt, cwd: string) => gitStatus(cwd))
   ipcMain.handle('git:branch', async (_evt, cwd: string) => gitBranch(cwd))
+  // One-shot project summary for the empty-chat screen (branch, last commit,
+  // tracked file count, working-tree change counts, diffstat).
+  ipcMain.handle('project:stats', async (_evt, cwd: string) => projectStats(cwd))
+  /** Initialize a git repo in cwd (git init + a baseline commit of an empty
+   *  tree so HEAD exists and downstream git operations are well-defined). */
+  ipcMain.handle('git:init', async (_evt, cwd: string): Promise<boolean> => {
+    try {
+      await execFileP('git', ['-C', cwd, 'init'], { windowsHide: true, timeout: 10000 })
+      // Commit an empty tree so there's a valid HEAD; harmless if there's
+      // nothing staged yet. --allow-empty keeps it from failing on a fresh dir.
+      await execFileP(
+        'git',
+        ['-C', cwd, 'commit', '--allow-empty', '-m', 'Initial commit'],
+        { windowsHide: true, timeout: 10000 },
+      )
+      return true
+    } catch (e) {
+      console.error('[git:init] failed', cwd, e)
+      return false
+    }
+  })
 
   // Session checkpoints: git stash-based snapshots before each agent turn.
   ipcMain.handle(

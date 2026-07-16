@@ -63,6 +63,27 @@ const api = {
   gitDiffStat: (cwd: string): Promise<{ added: number; removed: number } | null> =>
     ipcRenderer.invoke('git:diffstat', cwd),
   gitBranch: (cwd: string): Promise<string | null> => ipcRenderer.invoke('git:branch', cwd),
+  /** One-shot project summary for the empty-chat screen (branch, last commit,
+   *  tracked file count, working-tree change counts, diffstat). */
+  projectStats: (
+    cwd: string,
+  ): Promise<{
+    isGitRepo: boolean
+    branch: string | null
+    headSha: string | null
+    headSubject: string | null
+    headAuthorName: string | null
+    headAuthorDate: string | null
+    headRelative: string | null
+    trackedFiles: number | null
+    modified: number
+    added: number
+    untracked: number
+    diffAdded: number
+    diffRemoved: number
+  }> => ipcRenderer.invoke('project:stats', cwd),
+  /** Initialize a git repository in cwd (git init + empty initial commit). */
+  gitInit: (cwd: string): Promise<boolean> => ipcRenderer.invoke('git:init', cwd),
   /** Per-line git change markers for the file viewer's gutter. */
   gitFileChanges: (
     cwd: string,

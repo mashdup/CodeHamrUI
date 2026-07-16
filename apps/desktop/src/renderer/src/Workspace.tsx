@@ -14,6 +14,8 @@ import { ResizeHandle, RowResizeHandle, BarMenuItem } from './components/ResizeH
 import { SearchModal, HistoryModal } from './components/Modals'
 import { CheckpointTimeline } from './components/CheckpointTimeline'
 import { CheckpointDiffModal } from './components/CheckpointDiffModal'
+import { ProjectStatsView } from './components/ProjectStatsView'
+import { Logo } from './Logo'
 import type { Attachment, InferenceStats, Item, ToolItem, SlashCmd, ChatEntry } from './workspace/types'
 import { uid, reseatIds, SLASH_COMMANDS, MAX_ATTACHMENTS } from './workspace/types'
 import { basename, clamp, normPath, isAbsPath, fileToAttachment } from './workspace/helpers'
@@ -912,9 +914,7 @@ export default function Workspace({
             className={`h-full space-y-3 overflow-y-auto py-4 ${compactBar ? 'px-2' : 'px-4'}`}
           >
             {items.length === 0 && (
-              <p className="mt-24 text-center text-sm text-zinc-500">
-                {connected ? 'Ready. Ask the agent something.' : 'Starting agent…'}
-              </p>
+              <EmptyChat cwd={cwd} connected={connected} projectName={basename(cwd)} />
             )}
             {rendered.map((r) =>
               r.kind === 'group' ? (
@@ -1457,6 +1457,50 @@ export default function Workspace({
           </div>
         </div>
       )}
+    </div>
+  )
+}
+
+/** Empty-chat screen: a polished "ready" state with a reusable project stats
+ *  panel, shown until the first message is sent. */
+function EmptyChat({
+  cwd,
+  connected,
+  projectName,
+}: {
+  cwd: string
+  connected: boolean
+  projectName: string
+}): React.JSX.Element {
+  return (
+    <div className="mx-auto flex min-h-full max-w-2xl flex-col items-center justify-center px-4 py-16">
+      {/* Logo mark — the app's anvil+spark glyph. */}
+      <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-2xl border border-zinc-800 bg-gradient-to-br from-zinc-800 to-zinc-900 shadow-lg">
+        <Logo className="h-8 w-8 text-zinc-200" />
+      </div>
+      <h1 className="text-center text-xl font-semibold text-zinc-200">{projectName}</h1>
+      <p className="mt-1 text-center text-sm text-zinc-500">
+        {connected ? (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-emerald-400" />
+            Ready. Ask the agent something.
+          </span>
+        ) : (
+          <span className="flex items-center gap-1.5">
+            <span className="inline-block h-1.5 w-1.5 animate-pulse rounded-full bg-amber-400" />
+            Starting agent…
+          </span>
+        )}
+      </p>
+
+      {/* Reusable stats view */}
+      <div className="mt-6 w-full">
+        <ProjectStatsView cwd={cwd} />
+      </div>
+
+      <p className="mt-6 text-center text-[11px] text-zinc-600">
+        Tip: drag files onto the window to attach, or press <kbd className="rounded border border-zinc-700 bg-zinc-800 px-1">/</kbd> for slash commands
+      </p>
     </div>
   )
 }
