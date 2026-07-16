@@ -12,11 +12,19 @@ IDs are recorded here; there are no secrets.
 - **Token URL**: `https://console.anthropic.com/v1/oauth/token`
 - **Client ID**: `9d1c250a-e61b-44d9-88ed-5944d1962f5e` (public, used by Claude Code)
 - **Scopes**: `org:create_api_key user:profile user:inference`
-- **Redirect URI (loopback)**: `http://localhost:<port>/callback`
-- **Redirect URI (paste-code fallback)**: `https://console.anthropic.com/oauth/code/callback`
+- **Redirect URI**: Anthropic's public client (`9d1c250a-…`) does NOT have a
+  loopback redirect registered — a loopback `redirect_uri` makes the authorize
+  submit 400 "Invalid request format". Use the fixed hosted redirect
+  `https://console.anthropic.com/oauth/code/callback`, which DISPLAYS the code
+  as `code#state` for the user to copy back into the app (manual paste flow).
 - **PKCE**: required (S256)
 - **Token exchange body**: JSON (`content-type: application/json`) with
   `grant_type`, `code`, `state`, `client_id`, `redirect_uri`, `code_verifier`.
+  The `state` field is REQUIRED by Anthropic's token endpoint (OpenAI's is not).
+- **Authorize URL**: must include `code=true` in addition to the standard PKCE
+  params. Without it the consent page renders but its submit POSTs
+  `400 Invalid request format` (the authorize endpoint at
+  `claude.ai/v1/oauth/<id>/authorize`).
 - **Refresh**: JSON body `{ grant_type: 'refresh_token', refresh_token, client_id }`.
 - **Token usage**: `Authorization: Bearer <access_token>` on the Messages API
   (`/v1/messages`), plus the `anthropic-beta` header for the subscription flow.
@@ -43,8 +51,10 @@ IDs are recorded here; there are no secrets.
 
 - **PKCE**: `code_verifier` = base64url(32 random bytes); `code_challenge` =
   base64url(SHA-256(verifier)); `code_challenge_method=S256`.
-- **CSRF**: generate a random `state`, pass it on the authorize URL, and reject
-  the callback if the returned `state` doesn't match.
+- **CSRF / state**: Anthropic's Claude Code flow requires `state` to EQUAL the
+  `code_verifier` (a base64url-without-padding of 32 random bytes), NOT an
+  independent random value. A mismatched/independent `state` 400s the authorize
+  submit as "Invalid request format". The token exchange echoes that same state.
 - **Loopback server**: bind `127.0.0.1:<ephemeral port>` only for the duration
   of one login; capture `code` + `state` on `/callback`, show a close-me page,
   then shut down.

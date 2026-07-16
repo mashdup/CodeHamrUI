@@ -54,12 +54,20 @@ const api = {
   scanModels: (url: string, key: string): Promise<string[]> =>
     ipcRenderer.invoke('models:scan', url, key),
   /** OAuth subscription linking (Claude / Codex). Phase 1: token acquisition. */
-  authStart: (provider: 'claude' | 'codex'): Promise<{ ok: boolean }> =>
-    ipcRenderer.invoke('auth:start', provider),
+  authStart: (
+    provider: 'claude' | 'codex',
+    cwd: string,
+  ): Promise<{ ok: boolean; needsCode: boolean; fellBack?: boolean; reason?: string }> =>
+    ipcRenderer.invoke('auth:start', provider, cwd),
+  authSubmitCode: (
+    provider: 'claude' | 'codex',
+    code: string,
+    cwd: string,
+  ): Promise<{ ok: boolean }> => ipcRenderer.invoke('auth:submit-code', provider, code, cwd),
   authStatus: (): Promise<{ claude: boolean; codex: boolean }> =>
     ipcRenderer.invoke('auth:status'),
-  authLogout: (provider: 'claude' | 'codex'): Promise<void> =>
-    ipcRenderer.invoke('auth:logout', provider),
+  authLogout: (provider: 'claude' | 'codex', cwd: string): Promise<void> =>
+    ipcRenderer.invoke('auth:logout', provider, cwd),
   gitDiffStat: (cwd: string): Promise<{ added: number; removed: number } | null> =>
     ipcRenderer.invoke('git:diffstat', cwd),
   gitBranch: (cwd: string): Promise<string | null> => ipcRenderer.invoke('git:branch', cwd),

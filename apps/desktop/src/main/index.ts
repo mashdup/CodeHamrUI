@@ -19,7 +19,7 @@ import { parse as parseYaml, stringify as stringifyYaml } from 'yaml'
 import electronUpdater from 'electron-updater'
 import { Command, ConfigFile } from '@codehamr-ui/protocol'
 import { AgentSession } from './agent/AgentSession'
-import { OAuthManager, type ProviderId } from './auth/OAuth'
+import { OAuthManager, SUBSCRIPTION, type ProviderId } from './auth/OAuth'
 import { fixShellPath } from './shellPath'
 
 const { autoUpdater } = electronUpdater
@@ -194,6 +194,9 @@ const presetsPath = (): string => join(app.getPath('userData'), 'presets.json')
  * src/main/auth/OAuth.ts and OAUTH_PLAN.md.
  */
 const oauth = new OAuthManager()
+// The manager is constructed before the main window exists; give it a lazy
+// getter so the in-app auth window can parent itself to the app window.
+oauth.getParentWindow = () => win
 
 function isProviderId(v: unknown): v is ProviderId {
   return v === 'claude' || v === 'codex'
@@ -821,6 +824,57 @@ async function writeConfigFile(cwd: string, cfg: ConfigFile): Promise<void> {
   await writeFile(join(dir, 'config.yaml'), CONFIG_HEADER + stringifyYaml(cfg), 'utf8')
 }
 
+/** Read the project's config.yaml, or null when absent/malformed. */
+async function readConfigFile(cwd: string): Promise<ConfigFile | null> {
+  try {
+    const text = await readFile(join(cwd, '.codehamr', 'config.yaml'), 'utf8')
+    const parsed = ConfigFile.safeParse(parseYaml(text))
+    return parsed.success ? parsed.data : null
+  } catch {
+    return null
+  }
+}
+
+/**
+ * Phase 2A: on a successful subscription link, materialize (or refresh) the
+ * provider's proxy-backed profile in the project's config.yaml and make it
+ * active. The profile's `key` is a `${ENV}` reference — the live token is
+ * injected into the agent's env at spawn (subscriptionEnv), never written to
+ * disk. `context_size` is omitted: the codehamr.com proxy is server-managed and
+ * reports the window via X-Context-Window (like hamrpass). Preserves an
+ * existing entry's model/context if the user already tuned it.
+ */
+async function upsertSubscriptionProfile(cwd: string, provider: ProviderId): Promise<void> {
+  const sub = SUBSCRIPTION[provider]
+  const existing = await readConfigFile(cwd)
+  const base: ConfigFile = existing ?? { active: sub.profileName, models: {} }
+  const prev = base.models[sub.profileName]
+  base.models[sub.profileName] = {
+    llm: prev?.llm || sub.model,
+    url: sub.url,
+    key: '${' + sub.envVar + '}',
+    ...(prev?.context_size ? { context_size: prev.context_size } : {}),
+  }
+  base.active = sub.profileName
+  await writeConfigFile(cwd, base)
+}
+
+/**
+ * On unlink, drop the provider's proxy profile from config.yaml (if present).
+ * If it was the active profile, fall back to another profile so Bootstrap
+ * doesn't dangle. Leaves the file untouched when there's no config yet.
+ */
+async function removeSubscriptionProfile(cwd: string, provider: ProviderId): Promise<void> {
+  const sub = SUBSCRIPTION[provider]
+  const cfg = await readConfigFile(cwd)
+  if (!cfg || !cfg.models[sub.profileName]) return
+  delete cfg.models[sub.profileName]
+  const names = Object.keys(cfg.models)
+  if (names.length === 0) return // leave an empty file alone; agent reseeds
+  if (!cfg.models[cfg.active]) cfg.active = names[0]
+  await writeConfigFile(cwd, cfg)
+}
+
 // ---------------------------------------------------------------------------
 // Chat history: one chat = the live pair (.codehamr/session.json for the
 // agent's memory + transcript.json for the UI view); archived chats keep
@@ -1022,17 +1076,34 @@ function wireIpc(): void {
   })
 
   // -------------------------------------------------------------------------
-  // OAuth subscription linking (Phase 1: token acquisition only).
+  // OAuth subscription linking (Phase 2A: token acquisition + proxy profile).
+  // Linking runs the browser flow, then writes a proxy-backed profile into the
+  // given workspace's config.yaml whose key references the live token via env.
+  //
+  // Two shapes: loopback providers (OpenAI) complete in auth:start; paste
+  // providers (Anthropic) return { needsCode: true } from auth:start, then the
+  // renderer collects the code the browser displays and calls auth:submit-code.
+  // The proxy profile is written once the token is actually stored.
   // -------------------------------------------------------------------------
-  ipcMain.handle('auth:start', async (_evt, provider: unknown) => {
+  ipcMain.handle('auth:start', async (_evt, provider: unknown, cwd: unknown) => {
     if (!isProviderId(provider)) throw new Error(`unknown provider: ${String(provider)}`)
-    await oauth.start(provider)
+    const { needsCode, fellBack, reason } = await oauth.start(provider)
+    if (!needsCode && typeof cwd === 'string' && cwd) {
+      await upsertSubscriptionProfile(cwd, provider)
+    }
+    return { ok: true, needsCode, fellBack, reason }
+  })
+  ipcMain.handle('auth:submit-code', async (_evt, provider: unknown, code: unknown, cwd: unknown) => {
+    if (!isProviderId(provider)) throw new Error(`unknown provider: ${String(provider)}`)
+    await oauth.finishPaste(provider, typeof code === 'string' ? code : '')
+    if (typeof cwd === 'string' && cwd) await upsertSubscriptionProfile(cwd, provider)
     return { ok: true }
   })
   ipcMain.handle('auth:status', async () => oauth.status())
-  ipcMain.handle('auth:logout', async (_evt, provider: unknown) => {
+  ipcMain.handle('auth:logout', async (_evt, provider: unknown, cwd: unknown) => {
     if (!isProviderId(provider)) throw new Error(`unknown provider: ${String(provider)}`)
     await oauth.logout(provider)
+    if (typeof cwd === 'string' && cwd) await removeSubscriptionProfile(cwd, provider)
   })
 
   ipcMain.handle('agent:start', async (_evt, cwd: string) => {
@@ -1053,6 +1124,10 @@ function wireIpc(): void {
     const session = new AgentSession({
       binaryPath: resolveBinary(),
       shellPath: resolveShell(),
+      // Inject live OAuth tokens for any linked subscription so a proxy-backed
+      // profile's `key: ${CODEHAMR_OAUTH_*}` resolves at dial-out. Recomputed
+      // here on every (re)start, so a mid-session refresh lands on next restart.
+      extraEnv: await oauth.subscriptionEnv(),
       cwd,
       onEvent: (event) => win?.webContents.send('agent:event', { cwd, event }),
       onNoise: (line) => {
@@ -1207,13 +1282,7 @@ function wireIpc(): void {
   })
 
   ipcMain.handle('config:read', async (_evt, cwd: string) => {
-    try {
-      const text = await readFile(join(cwd, '.codehamr', 'config.yaml'), 'utf8')
-      const parsed = ConfigFile.safeParse(parseYaml(text))
-      return parsed.success ? parsed.data : null
-    } catch {
-      return null // no config yet: the agent writes one on first start
-    }
+    return await readConfigFile(cwd)
   })
 
   ipcMain.handle('config:write', async (_evt, cwd: string, raw: unknown) => {

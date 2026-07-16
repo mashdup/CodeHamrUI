@@ -27,6 +27,14 @@ export interface AgentSessionOptions {
    * Git for Windows. Null/absent → the agent falls back to Git Bash on PATH.
    */
   shellPath?: string | null
+  /**
+   * Extra environment variables merged into the child's env at spawn. Used to
+   * inject live OAuth access tokens (CODEHAMR_OAUTH_*) that a subscription
+   * profile references as `key: ${VAR}`, so the token reaches the agent via
+   * env instead of disk. Recomputed on every start() so a refreshed token is
+   * picked up on the next agent restart.
+   */
+  extraEnv?: Record<string, string>
   onEvent: (event: AgentEvent) => void
   /** Raw stdout lines that failed protocol parsing — logged, never fatal. */
   onNoise?: (line: string) => void
@@ -62,6 +70,9 @@ export class AgentSession {
         GODEBUG: 'asyncpreemptoff=1',
         // Bundled POSIX shell for the bash tool (Windows), if we shipped one.
         ...(this.opts.shellPath ? { CODEHAMR_SHELL: this.opts.shellPath } : {}),
+        // Live OAuth access tokens for any linked subscription, referenced by
+        // the profile's key as ${CODEHAMR_OAUTH_*}. Last so it wins.
+        ...(this.opts.extraEnv ?? {}),
       },
       windowsHide: true,
     })

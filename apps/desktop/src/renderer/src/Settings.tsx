@@ -48,13 +48,13 @@ export function SettingsPanel({
   const [presetName, setPresetName] = useState('')
   // Which panel tab is showing: the model-profile editor or project memory.
   const [tab, setTab] = useState<'models' | 'memory' | 'accounts'>('models')
-  // OAuth subscription linking (Accounts tab) is Phase-1-only: token
-  // acquisition works, but turns aren't yet routed through a linked
-  // subscription (Phase 2 is unstarted — see OAUTH_PLAN.md). Hidden until the
-  // backend transport lands so we don't ship a Link button that does nothing
-  // useful yet. The AccountsSection component + IPC/main wiring stay in place;
-  // flip this to true to bring the tab back.
-  const SHOW_ACCOUNTS = false
+  // OAuth subscription linking (Accounts tab). Linking runs the browser OAuth
+  // flow (Phase 1) AND materializes a proxy-backed profile in this project's
+  // config.yaml whose key is a `${ENV}` reference resolved at agent-spawn time
+  // to the live (auto-refreshed) OAuth token — so turns route through the
+  // linked subscription via the codehamr.com proxy without the token ever
+  // touching disk (Phase 2, Option A — see OAUTH_PLAN.md).
+  const SHOW_ACCOUNTS = true
 
   const configToForm = (cfg: ConfigFile): void => {
     setActive(cfg.active)
@@ -245,7 +245,7 @@ export function SettingsPanel({
         {tab === 'memory' ? (
           <MemorySection workspace={workspace} />
         ) : tab === 'accounts' && SHOW_ACCOUNTS ? (
-          <AccountsSection />
+          <AccountsSection workspace={workspace} onChanged={onSaved} />
         ) : (
           <>
             <p className="mb-3 text-xs text-zinc-500">
@@ -419,21 +419,34 @@ export function SettingsPanel({
 
 
 /**
- * AccountsSection: link/unlink a Claude or Codex subscription via OAuth
- * (Phase 1 — token acquisition only; turns aren't yet routed through the
- * subscription). Status comes from auth:status; Link runs the browser flow via
- * auth:start; Unlink deletes stored tokens via auth:logout. Tokens live
- * encrypted under Electron userData, never in the repo.
+ * AccountsSection: link/unlink a Claude or Codex subscription via OAuth. On
+ * link, main runs the browser flow and writes a proxy-backed profile into this
+ * project's config.yaml (key = a `${ENV}` reference to the live token); on
+ * unlink it removes that profile. `onChanged` restarts the agent so the new
+ * active profile + injected token take effect (Phase 2, Option A). Status comes
+ * from auth:status. Tokens live encrypted under Electron userData, never in the
+ * repo.
  */
 const ACCOUNT_PROVIDERS = [
   { id: 'claude', label: 'Claude', hint: 'Anthropic subscription' },
   { id: 'codex', label: 'Codex', hint: 'ChatGPT / OpenAI subscription' },
 ] as const
 
-function AccountsSection(): React.JSX.Element {
+function AccountsSection({
+  workspace,
+  onChanged,
+}: {
+  workspace: string
+  onChanged: () => void
+}): React.JSX.Element {
   const [status, setStatus] = useState<{ claude: boolean; codex: boolean } | null>(null)
   const [busy, setBusy] = useState<'claude' | 'codex' | ''>('')
   const [error, setError] = useState('')
+  // Paste-mode (Claude): after the browser opens, the provider shows a code the
+  // user copies back. Non-null id means we're awaiting a paste for that provider.
+  const [awaitingCode, setAwaitingCode] = useState<'claude' | 'codex' | null>(null)
+  const [fallbackNote, setFallbackNote] = useState('')
+  const [code, setCode] = useState('')
 
   const refresh = (): void => {
     void window.codehamr.authStatus().then(setStatus)
@@ -442,10 +455,24 @@ function AccountsSection(): React.JSX.Element {
 
   const link = async (id: 'claude' | 'codex'): Promise<void> => {
     setError('')
+    setFallbackNote('')
     setBusy(id)
     try {
-      await window.codehamr.authStart(id)
+      const { needsCode, fellBack } = await window.codehamr.authStart(id, workspace)
+      if (needsCode) {
+        // Either a paste-only provider, or the in-app window couldn't complete
+        // and we fell back to the system browser. Wait for the pasted code.
+        setAwaitingCode(id)
+        setCode('')
+        if (fellBack) {
+          setFallbackNote(
+            "Couldn't finish sign-in in the app window — opened your browser instead.",
+          )
+        }
+        return
+      }
       refresh()
+      onChanged() // config now carries the proxy profile; restart the agent
     } catch (e) {
       setError((e as Error).message)
     } finally {
@@ -453,11 +480,36 @@ function AccountsSection(): React.JSX.Element {
     }
   }
 
+  const submitCode = async (id: 'claude' | 'codex'): Promise<void> => {
+    setError('')
+    setBusy(id)
+    try {
+      await window.codehamr.authSubmitCode(id, code, workspace)
+      setAwaitingCode(null)
+      setFallbackNote('')
+      setCode('')
+      refresh()
+      onChanged()
+    } catch (e) {
+      setError((e as Error).message)
+    } finally {
+      setBusy('')
+    }
+  }
+
+  const cancelCode = (): void => {
+    setAwaitingCode(null)
+    setFallbackNote('')
+    setCode('')
+    setError('')
+  }
+
   const unlink = async (id: 'claude' | 'codex'): Promise<void> => {
     setError('')
     try {
-      await window.codehamr.authLogout(id)
+      await window.codehamr.authLogout(id, workspace)
       refresh()
+      onChanged()
     } catch (e) {
       setError((e as Error).message)
     }
@@ -467,8 +519,8 @@ function AccountsSection(): React.JSX.Element {
     <div className="flex flex-col gap-3">
       <p className="text-xs text-zinc-500">
         Link a subscription instead of pasting an API key. Tokens are stored
-        encrypted on this machine (never in the project). Linking captures the
-        credential now; routing agent turns through it lands in a later update.
+        encrypted on this machine (never in the project); a proxy-backed profile
+        is added to this project so agent turns route through the subscription.
       </p>
       {error && (
         <div className="rounded border border-red-900 bg-red-950/40 px-3 py-2 text-xs text-red-300">
@@ -479,43 +531,88 @@ function AccountsSection(): React.JSX.Element {
         {ACCOUNT_PROVIDERS.map(({ id, label, hint }) => {
           const linked = status?.[id] ?? false
           const pending = busy === id
+          const awaiting = awaitingCode === id
           return (
             <div
               key={id}
-              className="flex items-center gap-3 rounded border border-zinc-800 bg-zinc-950/50 px-3 py-2.5"
+              className="flex flex-col gap-2 rounded border border-zinc-800 bg-zinc-950/50 px-3 py-2.5"
             >
-              <div className="flex flex-col">
-                <span className="text-sm font-medium text-zinc-100">{label}</span>
-                <span className="text-[11px] text-zinc-500">{hint}</span>
-              </div>
-              <span
-                className={`ml-auto flex items-center gap-1.5 text-xs ${
-                  linked ? 'text-emerald-400' : 'text-zinc-500'
-                }`}
-              >
+              <div className="flex items-center gap-3">
+                <div className="flex flex-col">
+                  <span className="text-sm font-medium text-zinc-100">{label}</span>
+                  <span className="text-[11px] text-zinc-500">{hint}</span>
+                </div>
                 <span
-                  className={`h-1.5 w-1.5 rounded-full ${
-                    linked ? 'bg-emerald-400' : 'bg-zinc-600'
+                  className={`ml-auto flex items-center gap-1.5 text-xs ${
+                    linked ? 'text-emerald-400' : 'text-zinc-500'
                   }`}
-                />
-                {pending ? 'Waiting for browser…' : linked ? 'Linked' : 'Not linked'}
-              </span>
-              {linked ? (
-                <button
-                  onClick={() => void unlink(id)}
-                  disabled={pending}
-                  className="rounded border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
                 >
-                  Unlink
-                </button>
-              ) : (
-                <button
-                  onClick={() => void link(id)}
-                  disabled={pending}
-                  className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium hover:bg-emerald-600 disabled:opacity-40"
-                >
-                  {pending ? 'Linking…' : 'Link'}
-                </button>
+                  <span
+                    className={`h-1.5 w-1.5 rounded-full ${
+                      linked ? 'bg-emerald-400' : 'bg-zinc-600'
+                    }`}
+                  />
+                  {awaiting
+                    ? 'Waiting for code…'
+                    : pending
+                      ? 'Signing in…'
+                      : linked
+                        ? 'Linked'
+                        : 'Not linked'}
+                </span>
+                {linked ? (
+                  <button
+                    onClick={() => void unlink(id)}
+                    disabled={pending}
+                    className="rounded border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300 hover:bg-zinc-800 disabled:opacity-40"
+                  >
+                    Unlink
+                  </button>
+                ) : awaiting ? (
+                  <button
+                    onClick={cancelCode}
+                    className="rounded border border-zinc-700 px-3 py-1 text-xs font-medium text-zinc-300 hover:bg-zinc-800"
+                  >
+                    Cancel
+                  </button>
+                ) : (
+                  <button
+                    onClick={() => void link(id)}
+                    disabled={pending}
+                    className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium hover:bg-emerald-600 disabled:opacity-40"
+                  >
+                    {pending ? 'Linking…' : 'Link'}
+                  </button>
+                )}
+              </div>
+              {awaiting && (
+                <div className="flex flex-col gap-1.5 border-t border-zinc-800 pt-2">
+                  {fallbackNote && (
+                    <span className="text-[11px] text-amber-400">{fallbackNote}</span>
+                  )}
+                  <span className="text-[11px] text-zinc-500">
+                    Authorize in the browser, then paste the code it shows here.
+                  </span>
+                  <div className="flex items-center gap-2">
+                    <input
+                      value={code}
+                      onChange={(e) => setCode(e.target.value)}
+                      onKeyDown={(e) => {
+                        if (e.key === 'Enter' && code.trim()) void submitCode(id)
+                      }}
+                      autoFocus
+                      placeholder="paste authorization code"
+                      className="flex-1 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-xs outline-none focus:border-zinc-500"
+                    />
+                    <button
+                      onClick={() => void submitCode(id)}
+                      disabled={pending || code.trim() === ''}
+                      className="rounded bg-emerald-700 px-3 py-1 text-xs font-medium hover:bg-emerald-600 disabled:opacity-40"
+                    >
+                      {pending ? 'Linking…' : 'Submit'}
+                    </button>
+                  </div>
+                </div>
               )}
             </div>
           )

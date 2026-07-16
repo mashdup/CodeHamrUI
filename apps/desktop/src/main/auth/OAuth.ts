@@ -14,7 +14,7 @@
  * log: they're persisted encrypted (Electron safeStorage) under userData, with
  * a 0o600 plaintext fallback only when safeStorage is unavailable.
  */
-import { app, safeStorage, shell } from 'electron'
+import { app, safeStorage, shell, BrowserWindow } from 'electron'
 import { createServer, type Server } from 'node:http'
 import { randomBytes, createHash } from 'node:crypto'
 import { readFile, writeFile, chmod } from 'node:fs/promises'
@@ -34,6 +34,30 @@ interface ProviderConfig {
   clientId: string
   scope: string
   bodyEncoding: BodyEncoding
+  /**
+   * How the auth code comes back:
+   *  - 'loopback': ephemeral 127.0.0.1 listener catches the redirect (OpenAI).
+   *  - 'paste': the provider only allows a fixed hosted redirect that DISPLAYS
+   *    the code for the user to copy back (Anthropic — its public client has no
+   *    loopback redirect registered, so a loopback authorize submit 400s
+   *    "Invalid request format"). pasteRedirectUri is the registered redirect.
+   */
+  redirectMode: 'loopback' | 'paste'
+  /** Required when redirectMode === 'paste': the provider's fixed redirect. */
+  pasteRedirectUri?: string
+  /**
+   * Extra query params appended to the authorize URL. Anthropic's flow
+   * requires `code=true`; without it the consent page renders but its submit
+   * POSTs 400 "Invalid request format".
+   */
+  authorizeExtra?: Record<string, string>
+  /**
+   * Whether the token exchange (and refresh) must echo the `state` value.
+   * Anthropic's token endpoint requires it; OpenAI's does not.
+   */
+  sendStateInExchange?: boolean
+  /** Extra headers on the token endpoint (Anthropic wants User-Agent: anthropic). */
+  tokenHeaders?: Record<string, string>
 }
 
 /**
@@ -50,6 +74,11 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
     scope: 'org:create_api_key user:profile user:inference',
     bodyEncoding: 'json',
+    redirectMode: 'paste',
+    pasteRedirectUri: 'https://console.anthropic.com/oauth/code/callback',
+    authorizeExtra: { code: 'true' },
+    sendStateInExchange: true,
+    tokenHeaders: { 'User-Agent': 'anthropic' },
   },
   codex: {
     id: 'codex',
@@ -59,6 +88,48 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     clientId: 'app_EMoamEEZ73f0CkXaXp7hrann',
     scope: 'openid profile email offline_access api.connectors.read api.connectors.invoke',
     bodyEncoding: 'form',
+    redirectMode: 'loopback',
+  },
+}
+
+/**
+ * Phase 2 (Option A) — how a linked subscription maps onto an OpenAI-shaped
+ * config.yaml profile that routes through the codehamr.com proxy.
+ *
+ * The proxy translates chat-completions ⇄ the provider's native API server-
+ * side, so the Go client stays OpenAI-only (the "one code path" rule in
+ * llm.go). Each provider gets its own proxy sub-path so the server can route by
+ * URL, and the profile's `key` is a `${ENV}` reference — the live OAuth access
+ * token is injected into the agent's environment at spawn time (see
+ * AgentSession / index.ts agent:start), so the token never lands on disk. The
+ * matching env var name is the single source of truth here.
+ *
+ * Server-side proxy routes are a dependency on the codehamr.com backend, out of
+ * scope for this repo.
+ */
+export interface SubscriptionProfile {
+  /** config.yaml profile key created/updated on link. */
+  profileName: string
+  /** Env var that carries the live access token; referenced as `${envVar}`. */
+  envVar: string
+  /** Proxy base URL; the Go client appends `/v1/chat/completions`. */
+  url: string
+  /** Default model id for the profile (user-editable afterward). */
+  model: string
+}
+
+export const SUBSCRIPTION: Record<ProviderId, SubscriptionProfile> = {
+  claude: {
+    profileName: 'claude',
+    envVar: 'CODEHAMR_OAUTH_CLAUDE',
+    url: 'https://codehamr.com/oauth/claude',
+    model: 'claude-sonnet-4-5',
+  },
+  codex: {
+    profileName: 'codex',
+    envVar: 'CODEHAMR_OAUTH_CODEX',
+    url: 'https://codehamr.com/oauth/codex',
+    model: 'gpt-5-codex',
   },
 }
 
@@ -80,6 +151,14 @@ const base64url = (buf: Buffer): string =>
  */
 export class OAuthManager {
   private readonly storePath: string
+
+  /**
+   * Optional accessor for the app's main window, used as the parent of the
+   * in-app auth BrowserWindow so it's modal-ish and returns focus on close.
+   * Injected from index.ts (the manager is constructed before the window
+   * exists, so this is a lazy getter, not a constructor arg).
+   */
+  getParentWindow?: () => BrowserWindow | null
 
   constructor() {
     this.storePath = join(app.getPath('userData'), 'oauth-tokens.enc')
@@ -138,21 +217,249 @@ export class OAuthManager {
   // --- login flow ----------------------------------------------------------
 
   /**
-   * Run the full browser OAuth flow for a provider: spin up a loopback
-   * listener on an ephemeral 127.0.0.1 port, open the authorize URL, capture
-   * the code (verifying state for CSRF), exchange it for tokens, and persist
-   * them. Resolves once linked; rejects on mismatch, error, or ~2min timeout.
+   * In-flight paste-mode login state, keyed by provider. The authorize URL is
+   * opened in the browser; the provider's hosted redirect DISPLAYS the code for
+   * the user to copy, and finishPaste() completes the exchange. Verifier/state
+   * are held here (never sent to the renderer) between start and finish.
    */
-  async start(providerId: ProviderId): Promise<void> {
+  private pending: Partial<
+    Record<ProviderId, { verifier: string; state: string; redirectUri: string }>
+  > = {}
+
+  /**
+   * Begin a login. Loopback providers (OpenAI) run the whole flow here and
+   * resolve when linked. Paste providers (Anthropic — no loopback redirect is
+   * registered for its public client) first try an in-app auth window that
+   * auto-captures the code from the callback navigation; if that isn't possible
+   * (no parent window, or the provider blocks embedded login) they fall back to
+   * opening the system browser and resolving with `{ needsCode: true }`, after
+   * which the caller collects the displayed code and calls finishPaste().
+   */
+  async start(providerId: ProviderId): Promise<{ needsCode: boolean; fellBack?: boolean; reason?: string }> {
     const provider = PROVIDERS[providerId]
     if (!provider) throw new Error(`unknown provider: ${providerId}`)
 
     const { verifier, challenge } = this.pkce()
-    const state = base64url(randomBytes(16))
+    // Anthropic's Claude Code flow requires state === code_verifier (not an
+    // independent random value); a mismatched state 400s the authorize submit
+    // as "Invalid request format". OpenAI is indifferent, so use it there too.
+    const state = verifier
+
+    if (provider.redirectMode === 'paste') {
+      const redirectUri = provider.pasteRedirectUri!
+      const authorizeUrl = this.authorizeUrl(provider, challenge, state, redirectUri)
+      // Preferred: in-app window that auto-returns the code. Only bail to paste
+      // when there's no window to parent it (headless/tests). A user-closed or
+      // provider-blocked window rejects, which surfaces to the UI.
+      const parent = this.getParentWindow?.() ?? null
+      if (parent) {
+        let captured: string
+        try {
+          captured = await this.awaitInAppCode(provider, authorizeUrl, redirectUri, parent)
+        } catch (e) {
+          // The in-app window itself failed (user closed it, provider blocked
+          // embedded login, timeout). Fall back to the system browser + manual
+          // paste so linking is still possible.
+          console.error(`[oauth ${providerId}] in-app window failed:`, (e as Error).message)
+          this.pending[providerId] = { verifier, state, redirectUri }
+          void shell.openExternal(authorizeUrl)
+          return { needsCode: true, fellBack: true, reason: (e as Error).message }
+        }
+        // We captured a code. The exchange is the same regardless of how the
+        // code arrived, so a failure here is NOT a reason to fall back to paste
+        // (it'd fail identically) — surface it so the real cause shows.
+        const [code, stateFromCode] = captured.split('#')
+        const tokens = await this.exchange(
+          provider,
+          code,
+          verifier,
+          redirectUri,
+          stateFromCode || state,
+        )
+        await this.persist(providerId, tokens)
+        return { needsCode: false }
+      }
+      // No parent window (headless/tests): straight to paste.
+      console.error(`[oauth ${providerId}] no parent window; using paste flow`)
+      this.pending[providerId] = { verifier, state, redirectUri }
+      void shell.openExternal(authorizeUrl)
+      return { needsCode: true }
+    }
 
     const { code, redirectUri } = await this.awaitCallback(provider, challenge, state)
-    const tokens = await this.exchange(provider, code, verifier, redirectUri)
+    const tokens = await this.exchange(provider, code, verifier, redirectUri, state)
+    await this.persist(providerId, tokens)
+    return { needsCode: false }
+  }
 
+  /**
+   * Open an in-app BrowserWindow at the authorize URL and resolve with the auth
+   * code once the provider navigates to its fixed callback URL. The code +
+   * state ride in the callback query string, so we intercept the navigation,
+   * read them, and close the window — no paste, focus returns to the app.
+   *
+   * A dedicated, partitioned session (no persistence) keeps this login isolated
+   * from the app's cookies. Rejects if the user closes the window or on a ~2min
+   * timeout. NEVER logs the code.
+   */
+  private awaitInAppCode(
+    provider: ProviderConfig,
+    authorizeUrl: string,
+    redirectUri: string,
+    parent: BrowserWindow,
+  ): Promise<string> {
+    return new Promise<string>((resolve, reject) => {
+      let settled = false
+      const authWin = new BrowserWindow({
+        parent,
+        // Not modal: modal trapped the window with no way to cancel. Parented +
+        // closable so the user can always back out; we also auto-close on
+        // success.
+        modal: false,
+        width: 520,
+        height: 720,
+        title: `Sign in — ${provider.label}`,
+        autoHideMenuBar: true,
+        webPreferences: {
+          nodeIntegration: false,
+          contextIsolation: true,
+          partition: `oauth-${provider.id}-${Date.now()}`, // isolated, ephemeral
+        },
+      })
+
+      const timer = setTimeout(
+        () => done(new Error('timed out waiting for authorization')),
+        300_000, // 5 min: a full sign-in (email, password, 2FA) can be slow
+      )
+      let poll: ReturnType<typeof setInterval> | null = null
+
+      const done = (error: Error | null, code?: string): void => {
+        if (settled) return
+        settled = true
+        clearTimeout(timer)
+        if (poll) clearInterval(poll)
+        // Remove the close handler first so programmatic close isn't read as
+        // a user cancel, then destroy the window.
+        authWin.removeListener('closed', onUserClose)
+        if (!authWin.isDestroyed()) authWin.destroy()
+        if (error) reject(error)
+        else resolve(code!)
+      }
+
+      // The callback can arrive two ways: (1) a real navigation to the redirect
+      // URL with ?code=&state= in the query, or (2) claude.ai's SPA rendering
+      // the code#state string into an on-page field WITHOUT navigating (what we
+      // actually observed). Cover both: check navigations AND poll the DOM.
+      const inspectUrl = (targetUrl: string): void => {
+        if (!targetUrl.startsWith(redirectUri)) return
+        try {
+          const u = new URL(targetUrl)
+          const err = u.searchParams.get('error')
+          if (err) return done(new Error(`authorization denied: ${err}`))
+          const code = u.searchParams.get('code')
+          const state = u.searchParams.get('state')
+          if (code) done(null, state ? `${code}#${state}` : code)
+        } catch {
+          /* not the URL we're waiting for */
+        }
+      }
+
+      // Extract a `code#state` token from the page: URL query first, then any
+      // input/textarea whose value looks like one. Runs in the page's own
+      // origin, so cross-origin is fine. Returns null until the code appears.
+      const scrape = `(() => {
+        try {
+          const p = new URLSearchParams(location.search);
+          const c = p.get('code');
+          if (c) return p.get('state') ? c + '#' + p.get('state') : c;
+          const re = /^[A-Za-z0-9_-]{16,}#[A-Za-z0-9_-]{8,}$/;
+          for (const el of document.querySelectorAll('input,textarea')) {
+            const v = (el.value || '').trim();
+            if (re.test(v)) return v;
+          }
+        } catch (e) {}
+        return null;
+      })()`
+
+      const tryScrape = (): void => {
+        if (settled || authWin.isDestroyed()) return
+        authWin.webContents
+          .executeJavaScript(scrape, true)
+          .then((val: unknown) => {
+            if (typeof val === 'string' && val) done(null, val)
+          })
+          .catch(() => {
+            /* page navigating / not ready */
+          })
+      }
+
+      const onUserClose = (): void => done(new Error('sign-in window was closed'))
+
+      authWin.webContents.on('will-redirect', (_e, targetUrl) => inspectUrl(targetUrl))
+      authWin.webContents.on('did-navigate', (_e, targetUrl) => {
+        inspectUrl(targetUrl)
+        tryScrape()
+      })
+      authWin.webContents.on('did-navigate-in-page', (_e, targetUrl) => {
+        inspectUrl(targetUrl)
+        tryScrape()
+      })
+      authWin.webContents.on('did-finish-load', () => tryScrape())
+      authWin.on('closed', onUserClose)
+      // Belt-and-braces: the code field can appear a moment after load with no
+      // navigation event, so poll too.
+      poll = setInterval(tryScrape, 700)
+
+      void authWin.loadURL(authorizeUrl)
+    })
+  }
+
+  /**
+   * Complete a paste-mode login with the code the user copied from the
+   * provider's redirect page. Anthropic shows `code#state`; we accept either
+   * that combined form or a bare code (falling back to the state we generated).
+   * Throws if there's no pending login or the exchange fails.
+   */
+  async finishPaste(providerId: ProviderId, pasted: string): Promise<void> {
+    const provider = PROVIDERS[providerId]
+    const pend = this.pending[providerId]
+    if (!provider || !pend) throw new Error('no pending authorization; click Link again')
+    const trimmed = pasted.trim()
+    if (!trimmed) throw new Error('paste the code from the browser')
+    // Anthropic's callback page yields `code#state`; split on '#'.
+    const [code, stateFromCode] = trimmed.split('#')
+    const state = stateFromCode || pend.state
+    if (!code) throw new Error('invalid code')
+    const tokens = await this.exchange(provider, code, pend.verifier, pend.redirectUri, state)
+    // Only clear the pending login once the exchange actually succeeded, so a
+    // failed Submit surfaces the real error and can be retried without
+    // redoing the browser step (deleting on failure masked it as "no pending").
+    await this.persist(providerId, tokens)
+    delete this.pending[providerId]
+  }
+
+  /** Build the authorize URL with PKCE + per-provider extras. */
+  private authorizeUrl(
+    provider: ProviderConfig,
+    challenge: string,
+    state: string,
+    redirectUri: string,
+  ): string {
+    const authorize = new URL(provider.authorizeUrl)
+    authorize.searchParams.set('response_type', 'code')
+    authorize.searchParams.set('client_id', provider.clientId)
+    authorize.searchParams.set('redirect_uri', redirectUri)
+    authorize.searchParams.set('scope', provider.scope)
+    authorize.searchParams.set('code_challenge', challenge)
+    authorize.searchParams.set('code_challenge_method', 'S256')
+    authorize.searchParams.set('state', state)
+    for (const [k, v] of Object.entries(provider.authorizeExtra ?? {})) {
+      authorize.searchParams.set(k, v)
+    }
+    return authorize.toString()
+  }
+
+  private async persist(providerId: ProviderId, tokens: StoredTokens): Promise<void> {
     const store = await this.load()
     store[providerId] = tokens
     await this.save(store)
@@ -222,15 +529,7 @@ export class OAuthManager {
       server.listen(0, '127.0.0.1', () => {
         const { port } = server.address() as AddressInfo
         redirectUri = `http://127.0.0.1:${port}/callback`
-        const authorize = new URL(provider.authorizeUrl)
-        authorize.searchParams.set('response_type', 'code')
-        authorize.searchParams.set('client_id', provider.clientId)
-        authorize.searchParams.set('redirect_uri', redirectUri)
-        authorize.searchParams.set('scope', provider.scope)
-        authorize.searchParams.set('code_challenge', challenge)
-        authorize.searchParams.set('code_challenge_method', 'S256')
-        authorize.searchParams.set('state', state)
-        void shell.openExternal(authorize.toString())
+        void shell.openExternal(this.authorizeUrl(provider, challenge, state, redirectUri))
       })
     })
   }
@@ -268,6 +567,7 @@ export class OAuthManager {
     code: string,
     verifier: string,
     redirectUri: string,
+    state: string,
   ): Promise<StoredTokens> {
     const { body, contentType } = this.encodeBody(provider, {
       grant_type: 'authorization_code',
@@ -275,15 +575,19 @@ export class OAuthManager {
       redirect_uri: redirectUri,
       client_id: provider.clientId,
       code_verifier: verifier,
+      ...(provider.sendStateInExchange ? { state } : {}),
     })
     const res = await fetch(provider.tokenUrl, {
       method: 'POST',
-      headers: { 'Content-Type': contentType },
+      headers: { 'Content-Type': contentType, ...(provider.tokenHeaders ?? {}) },
       body,
     })
     if (!res.ok) {
-      // Do not include the response body verbatim in case it echoes a token.
-      throw new Error(`token exchange failed: HTTP ${res.status}`)
+      // An OAuth error body is `{error, error_description}` — no token in it, so
+      // it's safe (and necessary) to surface for diagnosis. Cap the length and
+      // strip newlines so a stray HTML error page can't flood the UI.
+      const detail = (await res.text().catch(() => '')).replace(/\s+/g, ' ').slice(0, 300)
+      throw new Error(`token exchange failed: HTTP ${res.status}${detail ? ` — ${detail}` : ''}`)
     }
     return this.parseTokens((await res.json()) as Record<string, unknown>)
   }
@@ -297,7 +601,7 @@ export class OAuthManager {
     })
     const res = await fetch(provider.tokenUrl, {
       method: 'POST',
-      headers: { 'Content-Type': contentType },
+      headers: { 'Content-Type': contentType, ...(provider.tokenHeaders ?? {}) },
       body,
     })
     if (!res.ok) throw new Error(`token refresh failed: HTTP ${res.status}`)
@@ -345,5 +649,22 @@ export class OAuthManager {
       }
     }
     return tokens.accessToken
+  }
+
+  /**
+   * Build the environment overrides for a freshly-spawned agent: for every
+   * linked provider, `{ [envVar]: <live access token> }` (refreshing any token
+   * within 60s of expiry first). Consumed by AgentSession so the profile's
+   * `key: ${CODEHAMR_OAUTH_*}` reference resolves to the current token at
+   * dial-out — the token stays in process memory, never on disk. Providers
+   * that aren't linked are simply absent.
+   */
+  async subscriptionEnv(): Promise<Record<string, string>> {
+    const env: Record<string, string> = {}
+    for (const id of Object.keys(PROVIDERS) as ProviderId[]) {
+      const token = await this.getValidAccessToken(id)
+      if (token) env[SUBSCRIPTION[id].envVar] = token
+    }
+    return env
   }
 }
