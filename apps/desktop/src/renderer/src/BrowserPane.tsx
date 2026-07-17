@@ -4,8 +4,21 @@ import { useEffect, useRef, useState } from 'react'
  * BrowserPane: a live Chromium <webview> in the preview slot, so you can watch
  * the app you're building (localhost:8080 etc.) without leaving the harness.
  * The webview runs out-of-process with Chromium defaults (no node integration).
- * Last URL persists per-workspace.
+ *
+ * Multiple tabs share ONE mounted <webview> element that swaps `src` on
+ * switch — tab metadata (url/title) lives in React state. Electron's
+ * <webview> GuestView doesn't reliably resync its internal render viewport
+ * once an element has ever been `display:none` (confirmed via devtools: the
+ * guest reports a stale window.innerHeight stuck at its initial intrinsic
+ * size), so keeping N stacked, hidden/shown webviews per tab silently breaks
+ * layout. A single always-visible webview sidesteps that bug entirely.
  */
+
+interface Tab {
+  id: string
+  url: string
+  title: string
+}
 
 // React's JSX map already includes <webview>; this is the subset of Electron's
 // WebviewTag methods the toolbar drives (typed locally to avoid pulling the
@@ -85,6 +98,9 @@ const LANDING_HTML = `<!doctype html><html><head><meta charset="utf-8">
 const LANDING = `data:text/html;charset=utf-8,${encodeURIComponent(LANDING_HTML)}`
 const isLanding = (u: string): boolean => u.startsWith('data:')
 
+let tabSeq = 0
+const nextTabId = (): string => `tab-${++tabSeq}`
+
 export function BrowserPane({
   cwd,
   navigate,
@@ -95,32 +111,49 @@ export function BrowserPane({
   navigate?: { url: string; nonce: number } | null
   onClose: () => void
 }): React.JSX.Element {
-  // `src` only changes on explicit Go/Enter — retyping in the bar must not
-  // navigate. The bar tracks in-page navigation via webview events.
   const initialUrl =
     (navigate && normalize(navigate.url.trim())) || localStorage.getItem(storageKey(cwd)) || ''
-  const [src, setSrc] = useState(() => initialUrl || LANDING)
-  const [bar, setBar] = useState(initialUrl) // empty while the landing shows
+
+  const [tabs, setTabs] = useState<Tab[]>(() => [
+    { id: nextTabId(), url: initialUrl || LANDING, title: initialUrl || 'New Tab' },
+  ])
+  const [activeId, setActiveId] = useState(() => tabs[0].id)
+  // `src` only changes on explicit Go/Enter/tab-switch — retyping in the bar
+  // must not navigate. The bar tracks in-page navigation via webview events.
+  const [bar, setBar] = useState(initialUrl)
   const [failed, setFailed] = useState<string | null>(null)
   const wvRef = useRef<WebviewEl | null>(null)
 
-  // External navigation: same URL means "show it again" — reload.
+  const activeTab = tabs.find((t) => t.id === activeId) ?? tabs[0]
+
+  const updateActiveTab = (patch: Partial<Tab>): void => {
+    setTabs((prev) => prev.map((t) => (t.id === activeId ? { ...t, ...patch } : t)))
+  }
+
+  // External navigation: same URL means "show it again" — reload. Reuses an
+  // existing tab with the same URL, else opens a new one.
   useEffect(() => {
     if (!navigate) return
     const u = normalize(navigate.url.trim())
     if (!u) return
     setFailed(null)
     setBar(u)
-    localStorage.setItem(storageKey(cwd), u)
-    setSrc((prev) => {
-      if (prev === u) {
-        try {
-          wvRef.current?.reload()
-        } catch {
-          /* not attached yet */
+    setTabs((prev) => {
+      const existing = prev.find((t) => t.url === u)
+      if (existing) {
+        setActiveId(existing.id)
+        if (existing.id === activeId) {
+          try {
+            wvRef.current?.reload()
+          } catch {
+            /* not attached yet */
+          }
         }
+        return prev
       }
-      return u
+      const id = nextTabId()
+      setActiveId(id)
+      return [...prev, { id, url: u, title: u }]
     })
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [navigate?.nonce])
@@ -137,6 +170,7 @@ export function BrowserPane({
         setBar(u)
         localStorage.setItem(storageKey(cwd), u)
       }
+      updateActiveTab({ url: u, title: u })
     }
     const onStart = (): void => setFailed(null)
     // Re-inject the scrollbar style on every page load — a full navigation
@@ -168,7 +202,8 @@ export function BrowserPane({
       wv.removeEventListener('dom-ready', onReady)
       wv.removeEventListener('did-fail-load', onFail)
     }
-  }, [cwd])
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [cwd, activeId])
 
   const go = (): void => {
     if (!bar.trim()) return
@@ -176,11 +211,45 @@ export function BrowserPane({
     setFailed(null)
     setBar(u)
     localStorage.setItem(storageKey(cwd), u)
-    if (u === src) {
+    if (u === activeTab.url) {
       wvRef.current?.reload() // same URL: Go acts as refresh
     } else {
-      setSrc(u)
+      updateActiveTab({ url: u, title: u })
     }
+  }
+
+  const switchTab = (id: string): void => {
+    if (id === activeId) return
+    setActiveId(id)
+    const tab = tabs.find((t) => t.id === id)
+    setBar(tab && !isLanding(tab.url) ? tab.url : '')
+    setFailed(null)
+  }
+
+  const addTab = (): void => {
+    const id = nextTabId()
+    setTabs((prev) => [...prev, { id, url: LANDING, title: 'New Tab' }])
+    setActiveId(id)
+    setBar('')
+    setFailed(null)
+  }
+
+  const closeTab = (id: string, e: React.MouseEvent): void => {
+    e.stopPropagation()
+    setTabs((prev) => {
+      const idx = prev.findIndex((t) => t.id === id)
+      const next = prev.filter((t) => t.id !== id)
+      if (next.length === 0) {
+        onClose()
+        return next
+      }
+      if (id === activeId) {
+        const newActive = next[Math.min(idx, next.length - 1)]
+        setActiveId(newActive.id)
+        setBar(isLanding(newActive.url) ? '' : newActive.url)
+      }
+      return next
+    })
   }
 
   // Webview methods throw before the tag finishes attaching; ignore that.
@@ -196,6 +265,32 @@ export function BrowserPane({
 
   return (
     <div className="flex h-full w-full flex-col border-l border-zinc-800">
+      {tabs.length > 1 && (
+        <div className="flex h-8 shrink-0 items-center gap-0.5 overflow-x-auto border-b border-zinc-800 bg-zinc-950 px-1.5">
+          {tabs.map((tab) => (
+            <div
+              key={tab.id}
+              onClick={() => switchTab(tab.id)}
+              title={isLanding(tab.url) ? 'New Tab' : tab.url}
+              className={`group flex h-6 max-w-[160px] shrink-0 cursor-pointer items-center gap-1 rounded px-2 text-[11px] ${
+                activeId === tab.id
+                  ? 'bg-zinc-800 text-zinc-200'
+                  : 'text-zinc-500 hover:bg-zinc-900 hover:text-zinc-300'
+              }`}
+            >
+              <span className="truncate">
+                {isLanding(tab.url) ? 'New Tab' : tab.title.replace(/^https?:\/\//, '')}
+              </span>
+              <button
+                onClick={(e) => closeTab(tab.id, e)}
+                className="rounded px-0.5 text-zinc-500 opacity-0 group-hover:opacity-100 hover:bg-zinc-600 hover:text-zinc-200"
+              >
+                ✕
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
       <div className="flex shrink-0 items-center gap-1 border-b border-zinc-800 px-2 py-1.5">
         <button
           onClick={() => nav((wv) => wv.goBack())}
@@ -235,6 +330,13 @@ export function BrowserPane({
           Go
         </button>
         <button
+          onClick={addTab}
+          title="new tab"
+          className="rounded px-1.5 py-0.5 text-xs text-zinc-400 hover:bg-zinc-800"
+        >
+          +
+        </button>
+        <button
           onClick={() => {
             const url = wvRef.current?.getURL() || bar
             if (url && !isLanding(url)) {
@@ -266,10 +368,16 @@ export function BrowserPane({
         </div>
       )}
       <webview
+        // Re-mounting on tab switch (key=activeId) is deliberate: Electron's
+        // <webview> GuestView never reliably resizes once an element has been
+        // hidden, so we keep exactly one always-visible webview instead of
+        // stacking one per tab. Cost: switching tabs reloads the page rather
+        // than restoring scroll/live state — acceptable for a dev preview.
+        key={activeId}
         ref={(el) => {
           wvRef.current = el as unknown as WebviewEl | null
         }}
-        src={src}
+        src={activeTab.url}
         className="h-full w-full flex-1 bg-white"
       />
     </div>

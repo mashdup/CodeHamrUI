@@ -5,6 +5,7 @@ import { AppearanceModal, SettingsPanel } from './Settings'
 import { FileTree } from './FileTree'
 import { FilePreview } from './FilePreview'
 import { BrowserPane } from './BrowserPane'
+import { PanelErrorBoundary } from './components/PanelErrorBoundary'
 import { StatusBar, ContextMeter, VisionHint } from './components/StatusBar'
 import { TranscriptItem } from './components/TranscriptItem'
 import { ToolGroupCard } from './components/ToolCard'
@@ -549,7 +550,9 @@ export default function Workspace({
                     />
                   )
                 : browserOpen && (
-                    <BrowserPane cwd={cwd} navigate={browserNav} onClose={closeBrowser} />
+                    <PanelErrorBoundary onReset={closeBrowser}>
+                      <BrowserPane cwd={cwd} navigate={browserNav} onClose={closeBrowser} />
+                    </PanelErrorBoundary>
                   )}
             </div>
           </Fragment>
@@ -648,6 +651,12 @@ export default function Workspace({
                 </BarMenuItem>
                 <BarMenuItem onClick={() => setSearchOpen(true)} close={setBarMenuOpen}>
                   Search…
+                </BarMenuItem>
+                <BarMenuItem
+                  onClick={() => void window.codehamr.openTerminal(cwd)}
+                  close={setBarMenuOpen}
+                >
+                  Open terminal…
                 </BarMenuItem>
               </div>
             )}
@@ -749,6 +758,24 @@ export default function Workspace({
               >
                 <circle cx="11" cy="11" r="7" />
                 <path d="m20.5 20.5-4.2-4.2" />
+              </svg>
+            </button>
+            <button
+              onClick={() => void window.codehamr.openTerminal(cwd)}
+              title="open a terminal at the project directory"
+              className="rounded bg-zinc-800 p-1 hover:bg-zinc-700"
+            >
+              <svg
+                viewBox="0 0 24 24"
+                className="h-3.5 w-3.5 text-zinc-300"
+                fill="none"
+                stroke="currentColor"
+                strokeWidth="2"
+                strokeLinecap="round"
+                strokeLinejoin="round"
+              >
+                <rect x="3" y="4" width="18" height="16" rx="2" />
+                <path d="m7 9 3 3-3 3M13 15h4" />
               </svg>
             </button>
           </>

@@ -45,6 +45,14 @@ export function FilePreview({
       return !w
     })
 
+  // Markdown preview vs raw source, persisted app-wide.
+  const [mdRaw, setMdRaw] = useState(() => localStorage.getItem('chmdraw') === '1')
+  const toggleMdRaw = (): void =>
+    setMdRaw((r) => {
+      localStorage.setItem('chmdraw', r ? '0' : '1')
+      return !r
+    })
+
   // Show the file vs its git diff. Only meaningful for text; the diff string is
   // fetched lazily (null = unknown/not fetched, '' = no changes → toggle hidden).
   const [showDiff, setShowDiff] = useState(false)
@@ -167,10 +175,43 @@ export function FilePreview({
             </svg>
           </button>
         )}
+        {preview.kind === 'markdown' && mdRaw && (
+          <button
+            onClick={toggleWrap}
+            title={wrap ? 'word wrap on — click to scroll long lines instead' : 'word wrap off'}
+            className={`ml-auto shrink-0 rounded p-1 hover:bg-zinc-800 ${
+              wrap ? 'text-sky-400' : 'text-zinc-500'
+            }`}
+          >
+            <svg
+              viewBox="0 0 24 24"
+              className="h-3.5 w-3.5"
+              fill="none"
+              stroke="currentColor"
+              strokeWidth="2"
+              strokeLinecap="round"
+              strokeLinejoin="round"
+            >
+              <path d="M4 6h16M4 12h13a3 3 0 0 1 0 6h-4" />
+              <path d="m13 15-3 3 3 3M4 18h3" />
+            </svg>
+          </button>
+        )}
+        {preview.kind === 'markdown' && (
+          <button
+            onClick={toggleMdRaw}
+            title={mdRaw ? 'showing raw markdown — click to render' : 'showing rendered markdown — click to view raw'}
+            className={`${mdRaw ? '' : 'ml-auto'} shrink-0 rounded px-1.5 py-0.5 text-[10px] font-medium hover:bg-zinc-800 ${
+              mdRaw ? 'bg-zinc-800 text-sky-400' : 'text-zinc-400'
+            }`}
+          >
+            {mdRaw ? 'Preview' : 'Raw'}
+          </button>
+        )}
         <button
           onClick={onClose}
           className={`shrink-0 rounded px-1.5 text-zinc-400 hover:bg-zinc-800 ${
-            preview.kind === 'text' || hasDiff ? '' : 'ml-auto'
+            preview.kind === 'text' || preview.kind === 'markdown' || hasDiff ? '' : 'ml-auto'
           }`}
         >
           ✕
@@ -181,7 +222,9 @@ export function FilePreview({
           app theme; the code body has its own look. */}
       <div
         className={`min-h-0 flex-1 overflow-auto ${
-          preview.kind === 'text' ? 'bg-[var(--code-bg)] text-[var(--code-fg)]' : ''
+          preview.kind === 'text' || (preview.kind === 'markdown' && mdRaw)
+            ? 'bg-[var(--code-bg)] text-[var(--code-fg)]'
+            : ''
         }`}
       >
         {showDiff && hasDiff ? (
@@ -193,6 +236,7 @@ export function FilePreview({
             gitChanges={gitChanges}
             onUseInPrompt={onUseInPrompt}
             wrap={wrap}
+            mdRaw={mdRaw}
           />
         )}
       </div>
@@ -240,6 +284,7 @@ function Body({
   gitChanges,
   onUseInPrompt,
   wrap,
+  mdRaw,
 }: {
   preview: Preview
   workspaceRoot: string
@@ -252,6 +297,7 @@ function Body({
     | null
   onUseInPrompt: (snippet: string) => void
   wrap: boolean
+  mdRaw: boolean
 }): React.JSX.Element {
   switch (preview.kind) {
     case 'text':
@@ -266,7 +312,16 @@ function Body({
         />
       )
     case 'markdown':
-      return (
+      return mdRaw ? (
+        <CodeView
+          content={preview.content}
+          path={preview.path}
+          workspaceRoot={workspaceRoot}
+          gitChanges={gitChanges}
+          onUseInPrompt={onUseInPrompt}
+          wrap={wrap}
+        />
+      ) : (
         <div className="markdown px-4 py-3 text-sm text-zinc-200">
           <ReactMarkdown remarkPlugins={[remarkGfm]}>{preview.content}</ReactMarkdown>
         </div>

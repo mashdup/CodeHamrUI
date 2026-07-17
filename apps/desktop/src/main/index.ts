@@ -1649,6 +1649,19 @@ function wireIpc(): void {
     return await shell.openPath(insideWorkspace(root, p))
   })
 
+  // Launch the user's OS terminal app opened at the project directory.
+  ipcMain.handle('terminal:open', async (_evt, cwd: string) => {
+    const dir = resolve(cwd)
+    if (process.platform === 'darwin') {
+      await execFileP('open', ['-a', 'Terminal', dir])
+    } else if (process.platform === 'win32') {
+      await execFileP('cmd', ['/c', 'start', '""', 'cmd'], { cwd: dir, windowsHide: false })
+    } else {
+      const term = process.env.TERMINAL || 'x-terminal-emulator'
+      await execFileP(term, [], { cwd: dir })
+    }
+  })
+
   // Move a file/folder to the OS trash (recoverable, not a hard delete).
   ipcMain.handle('path:trash', async (_evt, root: string, p: string) => {
     const abs = insideWorkspace(root, p)

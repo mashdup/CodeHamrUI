@@ -163,6 +163,8 @@ const api = {
    *  or the error message shell reports. */
   openPath: (root: string, p: string): Promise<string> =>
     ipcRenderer.invoke('path:open', root, p),
+  /** Launch the user's OS terminal app opened at the project directory. */
+  openTerminal: (cwd: string): Promise<void> => ipcRenderer.invoke('terminal:open', cwd),
   /** Move a file/folder to the OS trash (recoverable). */
   trashPath: (root: string, p: string): Promise<void> =>
     ipcRenderer.invoke('path:trash', root, p),
