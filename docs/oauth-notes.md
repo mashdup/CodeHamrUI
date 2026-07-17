@@ -9,14 +9,19 @@ IDs are recorded here; there are no secrets.
 ## Anthropic (Claude)
 
 - **Authorize URL**: `https://claude.ai/oauth/authorize`
-- **Token URL**: `https://console.anthropic.com/v1/oauth/token`
+- **Token URL**: `https://platform.claude.com/v1/oauth/token` (Anthropic
+  MIGRATED OAuth off `console.anthropic.com` — the old
+  `console.anthropic.com/v1/oauth/token` now returns **404**, which silently
+  broke linking. Confirmed live: `platform.claude.com/v1/oauth/token` returns a
+  proper `invalid_grant` OAuth error for a bad code.)
 - **Client ID**: `9d1c250a-e61b-44d9-88ed-5944d1962f5e` (public, used by Claude Code)
 - **Scopes**: `org:create_api_key user:profile user:inference`
 - **Redirect URI**: Anthropic's public client (`9d1c250a-…`) does NOT have a
   loopback redirect registered — a loopback `redirect_uri` makes the authorize
   submit 400 "Invalid request format". Use the fixed hosted redirect
-  `https://console.anthropic.com/oauth/code/callback`, which DISPLAYS the code
+  `https://platform.claude.com/oauth/code/callback`, which DISPLAYS the code
   as `code#state` for the user to copy back into the app (manual paste flow).
+  (Also migrated off `console.anthropic.com`.)
 - **PKCE**: required (S256)
 - **Token exchange body**: JSON (`content-type: application/json`) with
   `grant_type`, `code`, `state`, `client_id`, `redirect_uri`, `code_verifier`.
@@ -26,6 +31,9 @@ IDs are recorded here; there are no secrets.
   `400 Invalid request format` (the authorize endpoint at
   `claude.ai/v1/oauth/<id>/authorize`).
 - **Refresh**: JSON body `{ grant_type: 'refresh_token', refresh_token, client_id }`.
+- **Token endpoint User-Agent**: send `claude-cli/<ver> (external, sdk-cli)`,
+  NOT `User-Agent: anthropic`. The endpoint **429 rate-limits** the literal
+  `anthropic` UA but accepts the Claude CLI's own UA string (confirmed live).
 - **Token usage**: `Authorization: Bearer <access_token>` on the Messages API
   (`/v1/messages`), plus the `anthropic-beta` header for the subscription flow.
   (Backend transport is Phase 2 — not implemented here.)

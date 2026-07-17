@@ -156,6 +156,19 @@ const api = {
   writeClipboard: (text: string): Promise<void> => ipcRenderer.invoke('clipboard:write', text),
   /** Open a URL in the user's default system browser. */
   openExternal: (url: string): Promise<void> => ipcRenderer.invoke('browser:openExternal', url),
+  /** Reveal a file/folder in the OS file manager (Finder / Explorer). */
+  revealPath: (root: string, p: string): Promise<void> =>
+    ipcRenderer.invoke('path:reveal', root, p),
+  /** Open a file/folder with the OS default handler. Resolves to '' on success
+   *  or the error message shell reports. */
+  openPath: (root: string, p: string): Promise<string> =>
+    ipcRenderer.invoke('path:open', root, p),
+  /** Move a file/folder to the OS trash (recoverable). */
+  trashPath: (root: string, p: string): Promise<void> =>
+    ipcRenderer.invoke('path:trash', root, p),
+  /** Rename a file/folder in place. Resolves to the new absolute path. */
+  renamePath: (root: string, p: string, name: string): Promise<string> =>
+    ipcRenderer.invoke('path:rename', root, p, name),
   getMode: (cwd: string): Promise<PermissionMode> => ipcRenderer.invoke('mode:get', cwd),
   setMode: (cwd: string, mode: PermissionMode): Promise<void> =>
     ipcRenderer.invoke('mode:set', cwd, mode),

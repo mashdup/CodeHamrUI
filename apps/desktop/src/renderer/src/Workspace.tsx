@@ -861,6 +861,7 @@ export default function Workspace({
                 changed={changedPaths}
                 reload={treeReload}
                 onOpen={openFile}
+                onToast={showToast}
               />
             </aside>
             <ResizeHandle
@@ -892,6 +893,7 @@ export default function Workspace({
                   changed={changedPaths}
                   reload={treeReload}
                   onOpen={openFile}
+                  onToast={showToast}
                 />
               </div>
             </aside>

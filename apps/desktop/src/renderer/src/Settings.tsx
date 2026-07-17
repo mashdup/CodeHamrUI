@@ -49,11 +49,11 @@ export function SettingsPanel({
   // Which panel tab is showing: the model-profile editor or project memory.
   const [tab, setTab] = useState<'models' | 'memory' | 'accounts'>('models')
   // OAuth subscription linking (Accounts tab). Linking runs the browser OAuth
-  // flow (Phase 1) AND materializes a proxy-backed profile in this project's
-  // config.yaml whose key is a `${ENV}` reference resolved at agent-spawn time
-  // to the live (auto-refreshed) OAuth token — so turns route through the
-  // linked subscription via the codehamr.com proxy without the token ever
-  // touching disk (Phase 2, Option A — see OAUTH_PLAN.md).
+  // flow (Phase 1) AND materializes a subscription-backed profile in this
+  // project's config.yaml whose key is a `${ENV}` reference resolved at
+  // agent-spawn time to the live (auto-refreshed) OAuth token — turns route
+  // through the in-process translating proxy (main/auth/proxy.ts) without the
+  // token ever touching disk (Phase 2 — see OAUTH_PLAN.md).
   const SHOW_ACCOUNTS = true
 
   const configToForm = (cfg: ConfigFile): void => {
@@ -86,6 +86,22 @@ export function SettingsPanel({
 
   const update = (i: number, patch: Partial<ProfileRow>): void => {
     setRows((prev) => prev!.map((r, idx) => (idx === i ? { ...r, ...patch } : r)))
+  }
+
+  /**
+   * A profile backed by an OAuth subscription (Claude/Codex) routes through the
+   * in-process proxy, so its `key` is a `${CODEHAMR_OAUTH_*}` env reference and
+   * its `url` is a throwaway 127.0.0.1 loopback port (rewritten every launch).
+   * Detect that off the stable key reference (URL/path is a fallback) so the UI
+   * can show "Connected to <Provider>" instead of the meaningless loopback URL.
+   */
+  const subscriptionLabel = (r: ProfileRow): string | null => {
+    const key = r.key.trim()
+    if (key === '${CODEHAMR_OAUTH_CLAUDE}') return 'Claude'
+    if (key === '${CODEHAMR_OAUTH_CODEX}') return 'Codex'
+    const m = /\/oauth\/(claude|codex)(?:\/|$)/.exec(r.url)
+    if (m) return m[1] === 'claude' ? 'Claude' : 'Codex'
+    return null
   }
 
   const scanModels = async (i: number): Promise<void> => {
@@ -348,6 +364,50 @@ export function SettingsPanel({
                   </button>
                 </div>
                 <div className="grid grid-cols-2 gap-2">
+                  {subscriptionLabel(r) ? (
+                    <>
+                      <div>
+                        <div className="flex items-end gap-1.5">
+                          <div className="flex-1">
+                            <Field label="model (llm)" value={r.llm} onChange={(v) => update(i, { llm: v })} placeholder="claude-sonnet-4-5" />
+                          </div>
+                          <button
+                            onClick={() => void scanModels(i)}
+                            disabled={r.scanning}
+                            title="list the models this subscription offers"
+                            className="shrink-0 rounded border border-zinc-700 bg-zinc-800 px-2 py-1 text-xs hover:bg-zinc-700 disabled:opacity-40"
+                          >
+                            {r.scanning ? 'Scanning…' : 'Scan'}
+                          </button>
+                        </div>
+                        {r.scanError && <p className="mt-1 text-[10px] text-red-400">{r.scanError}</p>}
+                        {r.scanned && r.scanned.length > 0 && (
+                          <select
+                            value=""
+                            onChange={(e) => e.target.value && update(i, { llm: e.target.value })}
+                            className="mt-1 w-full rounded border border-zinc-700 bg-zinc-900 px-2 py-1 text-xs outline-none"
+                          >
+                            <option value="">{r.scanned.length} models found — pick one…</option>
+                            {r.scanned.map((m) => (
+                              <option key={m} value={m}>
+                                {m}
+                              </option>
+                            ))}
+                          </select>
+                        )}
+                      </div>
+                      <div className="flex flex-col justify-end">
+                        <span className="mb-1 block text-[10px] uppercase tracking-wide text-zinc-500">
+                          endpoint
+                        </span>
+                        <div className="flex items-center gap-1.5 rounded border border-emerald-800/60 bg-emerald-950/30 px-2 py-1 text-sm text-emerald-300">
+                          <span className="inline-block h-1.5 w-1.5 rounded-full bg-emerald-400" />
+                          Connected to {subscriptionLabel(r)} subscription
+                        </div>
+                      </div>
+                    </>
+                  ) : (
+                    <>
                   <div>
                     <div className="flex items-end gap-1.5">
                       <div className="flex-1">
@@ -381,6 +441,8 @@ export function SettingsPanel({
                   <Field label="endpoint url" value={r.url} onChange={(v) => update(i, { url: v })} placeholder="http://localhost:11434" />
                   <Field label="api key" value={r.key} onChange={(v) => update(i, { key: v })} placeholder="empty for local · ${VAR} for env" password />
                   <Field label="context size (empty = server-managed)" value={r.contextSize} onChange={(v) => update(i, { contextSize: v })} placeholder="32768" />
+                    </>
+                  )}
                 </div>
               </div>
             ))}

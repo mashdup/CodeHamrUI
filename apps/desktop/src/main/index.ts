@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog, clipboard } from 'electron'
+import { app, BrowserWindow, ipcMain, dialog, clipboard, shell } from 'electron'
 import { join, resolve, sep, relative, isAbsolute } from 'node:path'
 import {
   existsSync,
@@ -20,6 +20,7 @@ import electronUpdater from 'electron-updater'
 import { Command, ConfigFile } from '@codehamr-ui/protocol'
 import { AgentSession } from './agent/AgentSession'
 import { OAuthManager, SUBSCRIPTION, type ProviderId } from './auth/OAuth'
+import { OAuthProxy } from './auth/proxy'
 import { fixShellPath } from './shellPath'
 
 const { autoUpdater } = electronUpdater
@@ -197,6 +198,16 @@ const oauth = new OAuthManager()
 // The manager is constructed before the main window exists; give it a lazy
 // getter so the in-app auth window can parent itself to the app window.
 oauth.getParentWindow = () => win
+
+/**
+ * Local translating proxy: the Go agent speaks only OpenAI chat-completions,
+ * but a subscription OAuth token only works on the provider's native API
+ * (Anthropic /v1/messages). We don't own a server to bridge them, so this
+ * in-process loopback server does the translation, pulling a live (refreshed)
+ * token from the manager per request. Started at app boot; the agent profile's
+ * URL is reconciled to its live 127.0.0.1 port on each agent:start.
+ */
+const oauthProxy = new OAuthProxy((provider) => oauth.getValidAccessToken(provider))
 
 function isProviderId(v: unknown): v is ProviderId {
   return v === 'claude' || v === 'codex'
@@ -1083,9 +1094,11 @@ async function readConfigFile(cwd: string): Promise<ConfigFile | null> {
  * provider's proxy-backed profile in the project's config.yaml and make it
  * active. The profile's `key` is a `${ENV}` reference — the live token is
  * injected into the agent's env at spawn (subscriptionEnv), never written to
- * disk. `context_size` is omitted: the codehamr.com proxy is server-managed and
- * reports the window via X-Context-Window (like hamrpass). Preserves an
- * existing entry's model/context if the user already tuned it.
+ * disk. `url` points at the in-process translating proxy's live loopback port
+ * (reconcileSubscriptionUrls rewrites it on every agent start, since the port
+ * is per-launch). `context_size` is omitted: the proxy reports the window via
+ * X-Context-Window (like hamrpass). Preserves an existing entry's model/context
+ * if the user already tuned it.
  */
 async function upsertSubscriptionProfile(cwd: string, provider: ProviderId): Promise<void> {
   const sub = SUBSCRIPTION[provider]
@@ -1094,12 +1107,39 @@ async function upsertSubscriptionProfile(cwd: string, provider: ProviderId): Pro
   const prev = base.models[sub.profileName]
   base.models[sub.profileName] = {
     llm: prev?.llm || sub.model,
-    url: sub.url,
+    url: oauthProxy.baseUrl(provider),
     key: '${' + sub.envVar + '}',
     ...(prev?.context_size ? { context_size: prev.context_size } : {}),
   }
   base.active = sub.profileName
   await writeConfigFile(cwd, base)
+}
+
+/**
+ * Rewrite any subscription profile's `url` to the current proxy loopback base
+ * before the agent spawns. The proxy binds an ephemeral port per app launch, so
+ * a URL persisted last session (or the dead codehamr.com/oauth/* placeholder
+ * from before the in-process proxy existed) is stale — this reconciles it.
+ * No-op when there's no config or no subscription profile.
+ */
+async function reconcileSubscriptionUrls(cwd: string): Promise<void> {
+  const cfg = await readConfigFile(cwd)
+  if (!cfg) return
+  let changed = false
+  for (const provider of Object.keys(SUBSCRIPTION) as ProviderId[]) {
+    const name = SUBSCRIPTION[provider].profileName
+    const profile = cfg.models[name]
+    if (!profile) continue
+    const live = oauthProxy.baseUrl(provider)
+    // Only treat it as a subscription profile if its key is the OAuth env ref,
+    // so a user's hand-rolled profile that happens to share the name is safe.
+    if (profile.key !== '${' + SUBSCRIPTION[provider].envVar + '}') continue
+    if (profile.url !== live) {
+      profile.url = live
+      changed = true
+    }
+  }
+  if (changed) await writeConfigFile(cwd, cfg)
 }
 
 /**
@@ -1381,6 +1421,9 @@ function wireIpc(): void {
         seededFrom = store.defaultPreset!
       }
     }
+    // Point any subscription profile at the proxy's live loopback port (and heal
+    // a stale/placeholder URL) before the agent reads config.yaml at boot.
+    await reconcileSubscriptionUrls(cwd)
     const session = new AgentSession({
       binaryPath: resolveBinary(),
       shellPath: resolveShell(),
@@ -1588,6 +1631,43 @@ function wireIpc(): void {
     }
     return abs
   }
+
+  // Open a URL in the user's default system browser.
+  ipcMain.handle('browser:openExternal', async (_evt, url: string) => {
+    await shell.openExternal(String(url))
+  })
+
+  // Reveal a file or folder in the OS file manager (Finder / Explorer),
+  // selecting the entry. Confined to the workspace like every other fs op.
+  ipcMain.handle('path:reveal', async (_evt, root: string, p: string) => {
+    shell.showItemInFolder(insideWorkspace(root, p))
+  })
+
+  // Open a file/folder with the OS default handler (double-click behavior).
+  // Returns the error string shell reports, or '' on success.
+  ipcMain.handle('path:open', async (_evt, root: string, p: string) => {
+    return await shell.openPath(insideWorkspace(root, p))
+  })
+
+  // Move a file/folder to the OS trash (recoverable, not a hard delete).
+  ipcMain.handle('path:trash', async (_evt, root: string, p: string) => {
+    const abs = insideWorkspace(root, p)
+    if (abs === resolve(root)) throw new Error('cannot delete the workspace root')
+    await shell.trashItem(abs)
+  })
+
+  // Rename a file/folder in place (same parent directory). Refuses to
+  // overwrite an existing entry and refuses to touch the workspace root.
+  ipcMain.handle('path:rename', async (_evt, root: string, p: string, name: string) => {
+    const abs = insideWorkspace(root, p)
+    if (abs === resolve(root)) throw new Error('cannot rename the workspace root')
+    const trimmed = String(name).trim()
+    if (!trimmed || /[\\/]/.test(trimmed)) throw new Error('invalid name')
+    const dest = insideWorkspace(root, join(abs, '..', trimmed))
+    if (existsSync(dest)) throw new Error(`"${trimmed}" already exists`)
+    await rename(abs, dest)
+    return dest
+  })
 
   ipcMain.handle('fs:list', async (_evt, root: string, dir: string) => {
     const abs = insideWorkspace(root, dir)
@@ -1900,6 +1980,9 @@ app.whenReady().then(() => {
   fixShellPath()
   wireIpc()
   wireAutoUpdate()
+  // Start the in-process OAuth translating proxy before any agent can spawn, so
+  // reconcileSubscriptionUrls has a live loopback port to point profiles at.
+  oauthProxy.start().catch((e) => console.error('[oauth proxy] failed to start:', e))
   createWindow()
   app.on('activate', () => {
     if (BrowserWindow.getAllWindows().length === 0) createWindow()
@@ -1909,5 +1992,6 @@ app.whenReady().then(() => {
 app.on('window-all-closed', () => {
   for (const cwd of [...sessions.keys()]) stopSession(cwd)
   for (const cwd of [...watchers.keys()]) stopWatcher(cwd)
+  oauthProxy.stop()
   if (process.platform !== 'darwin') app.quit()
 })

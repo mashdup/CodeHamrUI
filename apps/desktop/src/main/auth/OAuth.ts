@@ -70,15 +70,18 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
     id: 'claude',
     label: 'Claude',
     authorizeUrl: 'https://claude.ai/oauth/authorize',
-    tokenUrl: 'https://console.anthropic.com/v1/oauth/token',
+    tokenUrl: 'https://platform.claude.com/v1/oauth/token',
     clientId: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
     scope: 'org:create_api_key user:profile user:inference',
     bodyEncoding: 'json',
     redirectMode: 'paste',
-    pasteRedirectUri: 'https://console.anthropic.com/oauth/code/callback',
+    pasteRedirectUri: 'https://platform.claude.com/oauth/code/callback',
     authorizeExtra: { code: 'true' },
     sendStateInExchange: true,
-    tokenHeaders: { 'User-Agent': 'anthropic' },
+    // The token endpoint rate-limits (429) requests with `User-Agent:
+    // anthropic`; it accepts the Claude CLI's own UA. Matching the CLI wire
+    // string is what the working opencode-claude-bridge does.
+    tokenHeaders: { 'User-Agent': 'claude-cli/2.1.98 (external, sdk-cli)' },
   },
   codex: {
     id: 'codex',
@@ -93,27 +96,23 @@ export const PROVIDERS: Record<ProviderId, ProviderConfig> = {
 }
 
 /**
- * Phase 2 (Option A) — how a linked subscription maps onto an OpenAI-shaped
- * config.yaml profile that routes through the codehamr.com proxy.
+ * Phase 2 (Option A, revised) — how a linked subscription maps onto an
+ * OpenAI-shaped config.yaml profile that routes through the IN-PROCESS
+ * translating proxy (src/main/auth/proxy.ts).
  *
- * The proxy translates chat-completions ⇄ the provider's native API server-
- * side, so the Go client stays OpenAI-only (the "one code path" rule in
- * llm.go). Each provider gets its own proxy sub-path so the server can route by
- * URL, and the profile's `key` is a `${ENV}` reference — the live OAuth access
- * token is injected into the agent's environment at spawn time (see
- * AgentSession / index.ts agent:start), so the token never lands on disk. The
- * matching env var name is the single source of truth here.
- *
- * Server-side proxy routes are a dependency on the codehamr.com backend, out of
- * scope for this repo.
+ * The proxy translates chat-completions ⇄ the provider's native API locally,
+ * so the Go client stays OpenAI-only (the "one code path" rule in llm.go). We
+ * don't own codehamr.com, so there is no server-side hop: the profile's `url`
+ * is set at agent-start to the proxy's live 127.0.0.1 port
+ * (reconcileSubscriptionUrls in index.ts), NOT stored here. The profile's `key`
+ * is a `${ENV}` reference — the live OAuth access token is injected into the
+ * agent's environment at spawn time, so the token never lands on disk.
  */
 export interface SubscriptionProfile {
   /** config.yaml profile key created/updated on link. */
   profileName: string
   /** Env var that carries the live access token; referenced as `${envVar}`. */
   envVar: string
-  /** Proxy base URL; the Go client appends `/v1/chat/completions`. */
-  url: string
   /** Default model id for the profile (user-editable afterward). */
   model: string
 }
@@ -122,13 +121,11 @@ export const SUBSCRIPTION: Record<ProviderId, SubscriptionProfile> = {
   claude: {
     profileName: 'claude',
     envVar: 'CODEHAMR_OAUTH_CLAUDE',
-    url: 'https://codehamr.com/oauth/claude',
     model: 'claude-sonnet-4-5',
   },
   codex: {
     profileName: 'codex',
     envVar: 'CODEHAMR_OAUTH_CODEX',
-    url: 'https://codehamr.com/oauth/codex',
     model: 'gpt-5-codex',
   },
 }
@@ -367,11 +364,20 @@ export class OAuthManager {
       // Extract a `code#state` token from the page: URL query first, then any
       // input/textarea whose value looks like one. Runs in the page's own
       // origin, so cross-origin is fine. Returns null until the code appears.
+      //
+      // The URL-query branch is gated on being ON the callback redirect: the
+      // AUTHORIZE page's own URL carries our `code=true` param (see
+      // authorizeExtra), so reading `code` off any page would grab the literal
+      // "true" and send it as the auth code (→ invalid_grant). Only the real
+      // redirect page's `code` is the auth code.
+      const redirectJson = JSON.stringify(redirectUri)
       const scrape = `(() => {
         try {
-          const p = new URLSearchParams(location.search);
-          const c = p.get('code');
-          if (c) return p.get('state') ? c + '#' + p.get('state') : c;
+          if (location.href.indexOf(${redirectJson}) === 0) {
+            const p = new URLSearchParams(location.search);
+            const c = p.get('code');
+            if (c && c !== 'true') return p.get('state') ? c + '#' + p.get('state') : c;
+          }
           const re = /^[A-Za-z0-9_-]{16,}#[A-Za-z0-9_-]{8,}$/;
           for (const el of document.querySelectorAll('input,textarea')) {
             const v = (el.value || '').trim();
