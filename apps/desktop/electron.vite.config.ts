@@ -1,10 +1,23 @@
 import { defineConfig } from 'electron-vite'
 import react from '@vitejs/plugin-react'
 import tailwindcss from '@tailwindcss/vite'
+import { resolve } from 'node:path'
 
 export default defineConfig({
   main: {},
-  preload: {},
+  preload: {
+    build: {
+      rollupOptions: {
+        // Two preload entries: the host renderer's API (index) and the
+        // webview guest's dialog bridge (webview). Both compile to
+        // out/preload/*.js.
+        input: {
+          index: resolve(__dirname, 'src/preload/index.ts'),
+          webview: resolve(__dirname, 'src/preload/webview.ts'),
+        },
+      },
+    },
+  },
   renderer: {
     plugins: [react(), tailwindcss()],
     server: {

@@ -3,6 +3,10 @@ import Workspace from './Workspace'
 import { Logo } from './Logo'
 import { StartScreen, pushRecent } from './StartScreen'
 import { applyStoredTheme, applyZoom, loadZoom, applyTheme, loadThemeChoice } from './themes'
+import {
+  WebviewDialogModal,
+  type WebviewDialogRequest,
+} from './components/WebviewDialogModal'
 
 // Apply before first paint — a flash of the stock theme would be ugly.
 // This loads from localStorage (fast). If localStorage is empty (dev restart),
@@ -23,6 +27,16 @@ export default function App(): React.JSX.Element {
   const [active, setActive] = useState<string | null>(null)
   const [updateVersion, setUpdateVersion] = useState<string | null>(null)
   const [updateError, setUpdateError] = useState<string | null>(null)
+  const [dialogQueue, setDialogQueue] = useState<WebviewDialogRequest[]>([])
+
+  // Live-preview <webview> dialogs (window.alert/confirm/prompt) are forwarded
+  // here from the main process. Each request blocks the guest's JS (sendSync)
+  // until we reply; while a modal is open we queue any further requests.
+  useEffect(() => {
+    return window.codehamr.onWebviewDialog((req) => {
+      setDialogQueue((prev) => [...prev, req])
+    })
+  }, [])
 
   useEffect(() => {
     // Load appearance from main process on startup. This is the durable
@@ -149,6 +163,16 @@ export default function App(): React.JSX.Element {
       {tabs.map((dir) => (
         <Workspace key={dir} cwd={dir} visible={active === dir} />
       ))}
+
+      {dialogQueue[0] && (
+        <WebviewDialogModal
+          req={dialogQueue[0]}
+          onReply={(id, value) => {
+            void window.codehamr.replyWebviewDialog(id, value)
+            setDialogQueue((prev) => prev.filter((d) => d.id !== id))
+          }}
+        />
+      )}
     </div>
   )
 }

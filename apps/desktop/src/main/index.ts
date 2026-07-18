@@ -27,6 +27,12 @@ const { autoUpdater } = electronUpdater
 
 let win: BrowserWindow | null = null
 
+// True once the user opts into an update: quitAndInstall() is closing every
+// window to hand off to Squirrel's ShipIt, which applies the update only after
+// this process fully exits. window-all-closed must force-quit in this state,
+// even on macOS where it normally keeps the (dockable) app alive.
+let installing = false
+
 /**
  * One agent per open workspace tab, keyed by the workspace path. Every event
  * forwarded to the renderer is tagged with that cwd so each tab folds only
@@ -1256,6 +1262,20 @@ function createWindow(): void {
   })
   win.on('ready-to-show', () => win?.show())
 
+  // Force the dialog-bridge preload onto every <webview> guest from the main
+  // process. The renderer's `preload` attribute on <webview> is unreliable in
+  // Electron 37 (silently ignored when set/changed after attach, and subject
+  // to sandbox rules), so we authoritatively set webPreferences here instead.
+  // This is what makes window.alert/confirm/prompt reach codehamrDialog.
+  win.webContents.on('will-attach-webview', (_event, webPreferences) => {
+    webPreferences.preload = join(__dirname, '../preload/webview.js')
+    webPreferences.contextIsolation = true
+    webPreferences.nodeIntegration = false
+    // sandbox must be off so the preload can require('electron') for
+    // contextBridge/ipcRenderer.
+    webPreferences.sandbox = false
+  })
+
   if (process.env.ELECTRON_RENDERER_URL) {
     win.loadURL(process.env.ELECTRON_RENDERER_URL)
   } else {
@@ -1926,6 +1946,33 @@ function wireIpc(): void {
     store.defaultPreset = name !== null && store.presets[name] ? name : undefined
     writePresets(store)
   })
+
+  // ── Live-preview browser dialogs (window.alert/confirm/prompt) ─────────
+  // A <webview> guest page calls window.alert/confirm/prompt, which we shim
+  // (via the webview preload) to ipcRenderer.sendSync('webview:dialog', ...).
+  // sendSync blocks the guest's JS until we set event.returnValue. We stash
+  // the IpcMainEvent, forward the request to the host renderer window — which
+  // shows a custom in-app modal — and, when the user responds, the renderer
+  // invokes 'webview:dialog:reply' and we set event.returnValue to unblock
+  // the guest with the correct synchronous return value.
+  const pendingDialogs = new Map<number, Electron.IpcMainEvent>()
+  let dialogCounter = 0
+  ipcMain.on('webview:dialog', (evt, payload: { type: string; message: string; default: string }) => {
+    const id = ++dialogCounter
+    pendingDialogs.set(id, evt)
+    // The sender's webContents is the webview guest; its URL tells the user
+    // which page is asking.
+    const url = evt.sender.getURL?.() ?? ''
+    win?.webContents.send('webview:dialog:request', { id, ...payload, url })
+  })
+  ipcMain.handle('webview:dialog:reply', (_evt, id: number, value: unknown) => {
+    const pending = pendingDialogs.get(id)
+    if (pending) {
+      pending.returnValue = value
+      pendingDialogs.delete(id)
+    }
+    return null
+  })
 }
 
 /**
@@ -1986,8 +2033,29 @@ function wireAutoUpdate(): void {
     win?.webContents.send('app:update-error', err.message)
   })
   ipcMain.handle('app:install-update', async () => {
+    // Squirrel's ShipIt installer only swaps the bundle AFTER this parent
+    // process fully exits — it spawns idle at download time and waits on our
+    // PID to die. quitAndInstall() closes every window, which fires
+    // `window-all-closed`; on macOS that handler intentionally does NOT
+    // app.quit() (dock-app convention), so without the `installing` guard the
+    // process would linger windowless forever, ShipIt would never run, and the
+    // next launch would relaunch the OLD version (the "restart does nothing"
+    // bug). Flag the install so window-all-closed force-quits, tear down every
+    // child that keeps the run loop alive (agents + the OAuth proxy), then
+    // hand off. isSilent=false, isForceRunAfter=true → relaunch on the new
+    // build after the swap.
+    installing = true
+    logLine('info', 'install-update requested; quitting for ShipIt handoff')
     for (const cwd of [...sessions.keys()]) stopSession(cwd)
-    autoUpdater.quitAndInstall()
+    for (const cwd of [...watchers.keys()]) stopWatcher(cwd)
+    oauthProxy.stop()
+    autoUpdater.quitAndInstall(false, true)
+    // quitAndInstall may return without the app actually terminating if a
+    // child still holds the run loop; guarantee exit so ShipIt is unblocked.
+    setTimeout(() => {
+      logLine('info', 'forcing app.exit(0) after quitAndInstall')
+      app.exit(0)
+    }, 2000)
   })
   void autoUpdater.checkForUpdates()
 
@@ -2014,5 +2082,8 @@ app.on('window-all-closed', () => {
   for (const cwd of [...sessions.keys()]) stopSession(cwd)
   for (const cwd of [...watchers.keys()]) stopWatcher(cwd)
   oauthProxy.stop()
-  if (process.platform !== 'darwin') app.quit()
+  // During an update handoff the app MUST fully exit even on macOS, or ShipIt
+  // (which waits on this PID to die before swapping the bundle) hangs forever
+  // and the next launch reopens the old version.
+  if (process.platform !== 'darwin' || installing) app.quit()
 })

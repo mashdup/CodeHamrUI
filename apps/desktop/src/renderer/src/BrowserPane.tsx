@@ -31,6 +31,7 @@ interface WebviewEl extends HTMLElement {
   goForward(): void
   reload(): void
   insertCSS(css: string): Promise<string>
+  executeJavaScript(code: string): Promise<unknown>
 }
 
 // Thin, rounded, semi-transparent scrollbar injected into every previewed
@@ -48,10 +49,30 @@ const SCROLLBAR_CSS = `
 ::-webkit-scrollbar-thumb:hover{background:rgba(140,140,150,.75);background-clip:content-box}
 ::-webkit-scrollbar-corner{background:transparent}`
 
+// Override window.alert/confirm/prompt in the guest page to delegate to our
+// in-app modal via the webview preload's codehamrDialog bridge (exposed by
+// contextBridge). Without this, webview suppresses native browser dialogs
+// entirely (no default UI). The bridge uses sendSync, so the page's JS blocks
+// until the user responds — matching native sync semantics.
+const DIALOG_OVERRIDE_JS = `(() => {
+  const b = window.codehamrDialog
+  if (!b || typeof b.alert !== 'function') return
+  const arg = a => (a === undefined ? '' : String(a))
+  window.alert = function(message) { b.alert(arg(message)) }
+  window.confirm = function(message) { return !!b.confirm(arg(message)) }
+  window.prompt = function(message, defaultValue) {
+    const r = b.prompt(arg(message), arg(defaultValue))
+    return r === null ? null : String(r)
+  }
+})()`
+
 const storageKey = (cwd: string): string => `chbrowser:${cwd}`
 
-const normalize = (raw: string): string =>
-  /^https?:\/\//i.test(raw) ? raw : `http://${raw}` // bare "localhost:8080" works
+const normalize = (raw: string): string => {
+  if (/^(https?|file|data):/i.test(raw)) return raw // already has a scheme
+  if (/^\/\/[^/]/.test(raw)) return `https:${raw}` // protocol-relative
+  return `http://${raw}` // bare "localhost:8080" works
+}
 
 // Landing page shown before anything is loaded — beats defaulting to
 // localhost:3000 (usually connection-refused). Self-contained data: URI; the
@@ -174,10 +195,20 @@ export function BrowserPane({
     }
     const onStart = (): void => setFailed(null)
     // Re-inject the scrollbar style on every page load — a full navigation
-    // swaps the document, so CSS from the previous page is gone.
+    // swaps the document, so CSS from the previous page is gone. Also install
+    // the window.alert/confirm/prompt shims that delegate to the webview
+    // preload's codehamrDialog bridge (which sendSyncs to the main process,
+    // which forwards to the host renderer's in-app modal). The override runs
+    // in the page's main world via executeJavaScript; with contextIsolation
+    // it can still see codehamrDialog (exposed via contextBridge).
     const onReady = (): void => {
       try {
         void wv.insertCSS(SCROLLBAR_CSS)
+      } catch {
+        /* not attached yet */
+      }
+      try {
+        void wv.executeJavaScript(DIALOG_OVERRIDE_JS)
       } catch {
         /* not attached yet */
       }
@@ -378,6 +409,10 @@ export function BrowserPane({
           wvRef.current = el as unknown as WebviewEl | null
         }}
         src={activeTab.url}
+        // The dialog-bridge preload and webPreferences (contextIsolation on,
+        // sandbox off) are set authoritatively in the main process via
+        // will-attach-webview — the <webview> preload attribute is unreliable
+        // in Electron 37, so we don't set it here.
         className="h-full w-full flex-1 bg-white"
       />
     </div>

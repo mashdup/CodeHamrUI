@@ -274,6 +274,35 @@ const api = {
     ipcRenderer.on('agent:exit', handler)
     return () => ipcRenderer.removeListener('agent:exit', handler)
   },
+  /** A live-preview <webview> page fired window.alert/confirm/prompt (shimmed
+   *  by the webview preload to sendSync). The main process forwards the request
+   *  here; the renderer shows an in-app modal and calls replyWebviewDialog to
+   *  unblock the guest. Until then the guest's JS is frozen. */
+  onWebviewDialog: (
+    cb: (req: {
+      id: number
+      type: 'alert' | 'confirm' | 'prompt'
+      message: string
+      default: string
+      url: string
+    }) => void,
+  ): (() => void) => {
+    const handler = (
+      _e: Electron.IpcRendererEvent,
+      req: {
+        id: number
+        type: 'alert' | 'confirm' | 'prompt'
+        message: string
+        default: string
+        url: string
+      },
+    ): void => cb(req)
+    ipcRenderer.on('webview:dialog:request', handler)
+    return () => ipcRenderer.removeListener('webview:dialog:request', handler)
+  },
+  /** Deliver the user's response to a webview dialog, unblocking the guest. */
+  replyWebviewDialog: (id: number, value: unknown): Promise<void> =>
+    ipcRenderer.invoke('webview:dialog:reply', id, value),
 }
 
 export type CodeHamrApi = typeof api
