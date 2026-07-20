@@ -354,14 +354,23 @@ export function SettingsPanel({
                     className="w-40 rounded border border-zinc-700 bg-zinc-900 px-2 py-1 font-mono text-sm outline-none focus:border-zinc-500"
                     placeholder="profile name"
                   />
-                  <button
-                    onClick={() => removeProfile(i)}
-                    disabled={rows.length === 1}
-                    title={rows.length === 1 ? 'at least one profile is required' : 'remove profile'}
-                    className="ml-auto rounded px-2 py-0.5 text-xs text-red-400 hover:bg-red-950 disabled:opacity-30"
-                  >
-                    remove
-                  </button>
+                  {subscriptionLabel(r) ? (
+                    <span
+                      title="managed by the linked subscription — unlink it in the Accounts tab to remove"
+                      className="ml-auto text-[11px] text-zinc-600"
+                    >
+                      managed via Accounts
+                    </span>
+                  ) : (
+                    <button
+                      onClick={() => removeProfile(i)}
+                      disabled={rows.length === 1}
+                      title={rows.length === 1 ? 'at least one profile is required' : 'remove profile'}
+                      className="ml-auto rounded px-2 py-0.5 text-xs text-red-400 hover:bg-red-950 disabled:opacity-30"
+                    >
+                      remove
+                    </button>
+                  )}
                 </div>
                 <div className="grid grid-cols-2 gap-2">
                   {subscriptionLabel(r) ? (

@@ -1101,7 +1101,7 @@ async function readConfigFile(cwd: string): Promise<ConfigFile | null> {
  * active. The profile's `key` is a `${ENV}` reference — the live token is
  * injected into the agent's env at spawn (subscriptionEnv), never written to
  * disk. `url` points at the in-process translating proxy's live loopback port
- * (reconcileSubscriptionUrls rewrites it on every agent start, since the port
+ * (ensureSubscriptionProfiles rewrites it on every agent start, since the port
  * is per-launch). `context_size` is omitted: the proxy reports the window via
  * X-Context-Window (like hamrpass). Preserves an existing entry's model/context
  * if the user already tuned it.
@@ -1122,28 +1122,56 @@ async function upsertSubscriptionProfile(cwd: string, provider: ProviderId): Pro
 }
 
 /**
- * Rewrite any subscription profile's `url` to the current proxy loopback base
- * before the agent spawns. The proxy binds an ephemeral port per app launch, so
- * a URL persisted last session (or the dead codehamr.com/oauth/* placeholder
- * from before the in-process proxy existed) is stale — this reconciles it.
- * No-op when there's no config or no subscription profile.
+ * Before the agent spawns, make every LINKED subscription appear in this
+ * project's config.yaml so its model is always selectable — the linked account
+ * is a global, project-independent thing (tokens live under userData), so it
+ * must be surfaced in every project regardless of what that project's config
+ * (or the seeded preset) happens to contain. This is additive:
+ *
+ *  - A linked provider missing from the config gets its proxy-backed profile
+ *    added (key = `${ENV}` ref, url = live proxy loopback). It is NOT made
+ *    active — the user's current model choice is preserved.
+ *  - An existing subscription profile has its `url` reconciled to the current
+ *    proxy loopback base (the port is per-launch, so a URL persisted last
+ *    session, or the dead codehamr.com/oauth/* placeholder, is stale).
+ *  - A subscription profile for a provider that is NO LONGER linked is dropped
+ *    (falling back off `active` if needed), so stale cloud entries don't linger.
+ *
+ * No-op when there's no config yet (the agent reseeds from the default preset).
  */
-async function reconcileSubscriptionUrls(cwd: string): Promise<void> {
+async function ensureSubscriptionProfiles(cwd: string): Promise<void> {
   const cfg = await readConfigFile(cwd)
   if (!cfg) return
+  const status = await oauth.status()
   let changed = false
   for (const provider of Object.keys(SUBSCRIPTION) as ProviderId[]) {
-    const name = SUBSCRIPTION[provider].profileName
-    const profile = cfg.models[name]
-    if (!profile) continue
+    const sub = SUBSCRIPTION[provider]
+    const envRef = '${' + sub.envVar + '}'
+    const profile = cfg.models[sub.profileName]
     const live = oauthProxy.baseUrl(provider)
-    // Only treat it as a subscription profile if its key is the OAuth env ref,
-    // so a user's hand-rolled profile that happens to share the name is safe.
-    if (profile.key !== '${' + SUBSCRIPTION[provider].envVar + '}') continue
-    if (profile.url !== live) {
-      profile.url = live
+
+    if (status[provider]) {
+      // Linked: ensure the profile exists and points at the live proxy port.
+      if (!profile) {
+        cfg.models[sub.profileName] = { llm: sub.model, url: live, key: envRef }
+        changed = true
+      } else if (profile.key === envRef && profile.url !== live) {
+        // Only rewrite the url of a profile we actually own (env-ref key), so a
+        // user's hand-rolled profile that happens to share the name is safe.
+        profile.url = live
+        changed = true
+      }
+    } else if (profile && profile.key === envRef) {
+      // Not linked but a subscription profile lingers: remove it.
+      delete cfg.models[sub.profileName]
       changed = true
     }
+  }
+  // Heal a dangling active pointer if we removed the profile it referenced.
+  const names = Object.keys(cfg.models)
+  if (names.length > 0 && !cfg.models[cfg.active]) {
+    cfg.active = names[0]
+    changed = true
   }
   if (changed) await writeConfigFile(cwd, cfg)
 }
@@ -1441,9 +1469,12 @@ function wireIpc(): void {
         seededFrom = store.defaultPreset!
       }
     }
-    // Point any subscription profile at the proxy's live loopback port (and heal
-    // a stale/placeholder URL) before the agent reads config.yaml at boot.
-    await reconcileSubscriptionUrls(cwd)
+    // Ensure every LINKED subscription is present + healed in config.yaml so its
+    // model is selectable in this project (linked accounts are global, not
+    // per-project), and drop any subscription profile that's no longer linked —
+    // before the agent reads config.yaml at boot. Additive: never changes the
+    // user's active model choice.
+    await ensureSubscriptionProfiles(cwd)
     const session = new AgentSession({
       binaryPath: resolveBinary(),
       shellPath: resolveShell(),
@@ -2070,7 +2101,7 @@ app.whenReady().then(() => {
   wireIpc()
   wireAutoUpdate()
   // Start the in-process OAuth translating proxy before any agent can spawn, so
-  // reconcileSubscriptionUrls has a live loopback port to point profiles at.
+  // ensureSubscriptionProfiles has a live loopback port to point profiles at.
   oauthProxy.start().catch((e) => console.error('[oauth proxy] failed to start:', e))
   createWindow()
   app.on('activate', () => {

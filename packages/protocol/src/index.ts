@@ -123,15 +123,18 @@ export const ClearedEvent = z.object({
   type: z.literal('cleared'),
 })
 
-/** Emitted after a `compact` command: the agent's history was replaced by a
- *  summary. text is the summary, historyLen the new message count, message a
- *  human-readable note (e.g. "compacted 42 messages into a summary"). */
+/** Emitted after a `compact` command, or automatically mid-turn when a long
+ *  session outgrows the context window. text is the summary, historyLen the new
+ *  message count, message a human-readable note. auto is true for the automatic
+ *  mid-turn compaction (the turn keeps running); absent/false for the manual
+ *  `/compact` command (which ends the turn). */
 export const CompactedEvent = z.object({
   v: z.literal(PROTOCOL_VERSION),
   type: z.literal('compacted'),
   text: z.string().optional(),
   historyLen: z.number().int().nonnegative().optional(),
   message: z.string().optional(),
+  auto: z.boolean().optional(),
 })
 
 export const ModeEvent = z.object({

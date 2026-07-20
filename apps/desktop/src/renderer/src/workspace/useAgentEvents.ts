@@ -86,14 +86,18 @@ export function useAgentEvents({
           resetSessionStats()
           break
         case 'compacted':
-          endTurn()
+          // Auto-compaction fires mid-turn to reclaim context; the turn keeps
+          // running, so must NOT endTurn. The manual /compact ends the turn.
+          if (!event.auto) endTurn()
           push({
             kind: 'notice',
             id: uid(),
             text:
               event.historyLen === 0
                 ? 'Nothing to compact yet.'
-                : `Context compacted — ${event.message ?? "the agent's memory was summarized"}. Your visible chat is unchanged.`,
+                : event.auto
+                  ? `Context auto-compacted — ${event.message ?? 'earlier messages were summarized to fit the window'}. Your visible chat is unchanged.`
+                  : `Context compacted — ${event.message ?? "the agent's memory was summarized"}. Your visible chat is unchanged.`,
             tone: 'info',
           })
           break
