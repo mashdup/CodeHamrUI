@@ -98,8 +98,8 @@ function hslToHex(h: number, s: number, l: number): string {
   return `#${hex(f(0))}${hex(f(8))}${hex(f(4))}`
 }
 
-// Stock (Forge) caption overlay: zinc-950 background, zinc-300 symbols.
-const STOCK_OVERLAY = { color: '#09090b', symbolColor: '#d4d4d8' }
+// Stock (Forge) caption overlay: zinc-900 background (matches the header bar), zinc-300 symbols.
+const STOCK_OVERLAY = { color: '#18181b', symbolColor: '#d4d4d8' }
 
 function setOverlay(color: string, symbolColor: string): void {
   window.codehamr?.setTitleBarOverlay?.(color, symbolColor)
@@ -180,9 +180,9 @@ export function applyTheme(choice: ThemeChoice, persist = true): void {
     for (const [v, val] of LIGHT_FIXES) root.style.setProperty(v, val)
   }
 
-  // Caption buttons: match the page (zinc-950, l=5) with readable symbols
+  // Caption buttons: match the header bar (zinc-900, l=10) with readable symbols
   // (zinc-300, l=84) — both flip automatically with the light ladder.
-  const ob = surface(5)
+  const ob = surface(10)
   const os = surface(84)
   setOverlay(hslToHex(ob.h, ob.s, ob.l), hslToHex(os.h, os.s, os.l))
 }

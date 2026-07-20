@@ -1272,8 +1272,8 @@ function createWindow(): void {
     ...(process.platform === 'win32'
       ? {
           titleBarOverlay: {
-            color: '#09090b', // zinc-950 — matches body / header background
-            symbolColor: '#a1a1aa', // zinc-400
+            color: '#18181b', // zinc-900 — matches the header bar background
+            symbolColor: '#d4d4d8', // zinc-300
             height: 40,
           },
         }
